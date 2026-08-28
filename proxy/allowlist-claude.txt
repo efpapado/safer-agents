@@ -1,0 +1,43 @@
+# =============================================================================
+#  allowlist-claude.txt — destinations for safer-claude only
+# =============================================================================
+#
+#  Read together with allowlist-common.txt, which holds the documentation hosts
+#  shared by all three commands. Put general-purpose sites there, not here.
+#  This file is for Claude Code's own services.
+#
+#  Anchor every line and escape the dots — see allowlist-common.txt for why
+#  that is not cosmetic, and for the two rules about which hosts are safe to
+#  add at all.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  REQUIRED
+# -----------------------------------------------------------------------------
+
+#  The Claude API itself: every request the agent makes to the model.
+#  Also used by WebFetch, which asks Anthropic to check a destination's
+#  reputation before fetching it.
+^api\.anthropic\.com$
+
+#  Renewing your login.
+#
+#  Do not remove this thinking it is optional. Your access token expires about
+#  once an hour, and the renewal goes to THIS host, not to api.anthropic.com.
+#  Without it, a session works beautifully for roughly an hour and then dies in
+#  a way that looks like a proxy fault.
+^platform\.claude\.com$
+
+
+# -----------------------------------------------------------------------------
+#  OPTIONAL
+# -----------------------------------------------------------------------------
+
+#  Lets the agent look up Claude Code's own documentation.
+^code\.claude\.com$
+^claude\.com$
+
+#  Only needed if a login is ever attempted INSIDE the container. You log in on
+#  the host, so normally this stays off.
+^claude\.ai$

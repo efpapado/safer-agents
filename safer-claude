@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  safer-claude — run Claude Code in a locked-down container
+# =============================================================================
+#
+#  USAGE
+#      safer-claude
+#      safer-claude --ro ../../../core --ro ../../../../vendor
+#      safer-claude --rw ../../contrib
+#      safer-claude --allow www.php.net
+#      safer-claude --effort high
+#      safer-claude --offline
+#      safer-claude -- bash
+#
+#  FLAGS
+#      --add PATH      mount a host folder READ-ONLY, in addition to the
+#                      current directory. --ro means the same thing
+#      --rw PATH       mount a host folder read-WRITE. The agent can change
+#                      your Mac through it, so a folder outside the current
+#                      directory has to be confirmed
+#      --allow HOST    permit one extra network destination for this run only
+#      --effort LEVEL  low, medium, high, xhigh or max. See the note below
+#      --offline       no network at all (the agent cannot reach the model API,
+#                      so this is only useful with `-- bash` for local analysis)
+#      -- COMMAND      run COMMAND instead of claude
+#
+#  WHERE THE REST OF THE LOGIC IS
+#  The sandbox itself — the sealed network, the gatekeeper, hiding .git, the
+#  connection log — is in lib/safer-common.sh, shared with safer-codex and
+#  safer-opencode. This file holds only what is specific to Claude Code.
+#
+#  ---------------------------------------------------------------------------
+#  SETTINGS INSIDE THE SANDBOX
+#  ---------------------------------------------------------------------------
+#  /effort, /model and the rest work normally. Changes apply for the session and
+#  are then thrown away — your Mac's settings are never modified.
+#
+#  This used to fail with:
+#
+#      EBUSY: resource busy or locked, rename
+#      '/home/agent/.claude/settings.json.tmp...' -> '.../settings.json'
+#
+#  The cause was not permissions. Claude Code saves settings by writing a
+#  temporary file and renaming it over the real one, and settings.json used to
+#  be mounted as a single file — which makes it a "mount point", and Linux
+#  refuses to let a rename replace a mount point. It would have failed even if
+#  the mount had been writable.
+#
+#  It is now a real file inside a throwaway copy of ~/.claude, so the rename
+#  works. See build_config() below, and the config strategy essay in
+#  lib/safer-common.sh for why this is also better security than what it
+#  replaced.
+#
+#  Note: --effort sets an environment variable that OVERRIDES /effort for the
+#  whole session. Use it for unattended runs; leave it off if you want to change
+#  effort while you work.
+#
+#  SESSION HISTORY: this project's transcript persists, because Claude Code
+#  stores transcripts per project and only this project's folder is shared.
+# =============================================================================
+
+set -euo pipefail
+
+
+# ---------------------------------------------------------------------------
+#  Find the folder this command lives in, and load the shared machinery.
+#
+#  We cannot just use the current directory: you run this from your project,
+#  not from here. And we cannot use "$0" directly, because that may be a
+#  relative path or a symlink.
+#
+#  BASH_SOURCE[0] is the path to this file. `dirname` strips the filename.
+#  `cd ... && pwd -P` turns it into a full path with all symlinks resolved.
+# ---------------------------------------------------------------------------
+SAFER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+TOOL="claude"
+
+# shellcheck source=lib/safer-common.sh
+source "$SAFER_ROOT/lib/safer-common.sh"
+
+
+usage() {
+    echo "Usage: safer-claude [--add PATH] [--rw PATH] [--allow HOST]"
+    echo "                    [--effort LEVEL] [--offline] [-- COMMAND ...]"
+    echo ""
+    echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
+    echo "  --rw PATH       mount a folder read-WRITE. The agent can change"
+    echo "                  your Mac through it, so ask for it by name. A"
+    echo "                  folder outside your project must be confirmed."
+    echo "  --allow HOST    allow one extra destination for this run only"
+    echo "  --effort LEVEL  low | medium | high | xhigh | max"
+    echo "  --offline       no network at all"
+    echo ""
+    echo "The folder you run in is always read-write. Inside every mounted"
+    echo "folder, .git and the paths in dangerous-paths.txt are covered so"
+    echo "the agent cannot write them. That list cannot be complete, so at"
+    echo "exit the run reports every auto-run file that appeared during the"
+    echo "session. Read it before you commit."
+}
+
+
+# =============================================================================
+#  What is specific to Claude Code
+# =============================================================================
+
+# The image name is deliberately NOT "agent-claude". That is what the older
+# safe-agent launcher builds, from a different Dockerfile. Sharing the name
+# would let these commands silently reuse an image built by that older recipe —
+# one that may still contain git. A separate name keeps the two independent.
+IMAGE="safer-agent-claude"
+DOCKERFILE="$DOCKER_DIR/Dockerfile.claude"
+
+VERSION_COMMAND=(claude --version)
+DEFAULT_COMMAND=(claude)
+
+CFG_HOST="$HOME/.claude"                 # on your Mac
+CFG_CONT="/home/agent/.claude"           # inside the container
+
+# Where macOS keeps the token. Confirm the name on your Mac with:
+#     security find-generic-password -s "Claude Code-credentials" -w
+KEYCHAIN_SERVICE="Claude Code-credentials"
+
+# The config folder is NOT mounted directly. See build_config() below.
+#
+# ~/.claude.json is listed as well: it lives outside the .claude folder and
+# --add or --ro must not be able to reach it either.
+PROTECTED_ROOTS+=("$CFG_HOST" "$HOME/.claude.json")
+
+# ---------------------------------------------------------------------------
+#  Environment variables for the container.
+#
+#  Claude Code contacts several hosts by default that have nothing to do with
+#  the work: telemetry, error reporting, the update check, artifact loading,
+#  and MCP connectors. Two reasons to switch them off rather than allow them:
+#
+#  1. Fewer entries on the allowlist is better.
+#  2. A blocked host does not fail cleanly — it times out. Left alone, these
+#     turn into multi-second stalls at startup, which is exactly what makes
+#     people give up on an allowlist.
+# ---------------------------------------------------------------------------
+TOOL_ENV=(
+    --env CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1  # telemetry + errors
+    --env DISABLE_AUTOUPDATER=1                       # update check
+    --env CLAUDE_CODE_DISABLE_ARTIFACT=1              # artifact loading
+    --env ENABLE_CLAUDEAI_MCP_SERVERS=false           # connectors, ON by default
+)
+
+# ---------------------------------------------------------------------------
+#  ~/.claude.json mixes per-project session state, rewritten constantly, with
+#  `mcpServers`, which starts processes on your Mac at launch. So it can be
+#  neither read-only nor shared. Copy it in; throw the copy away.
+#
+#  This file lives at $HOME/.claude.json, OUTSIDE the .claude folder, so
+#  build_config() does not cover it.
+# ---------------------------------------------------------------------------
+add_copy "$HOME/.claude.json" "/home/agent/.claude.json"
+
+
+# ---------------------------------------------------------------------------
+#  Seed the token for the sandbox.
+#
+#  On macOS the live token is in the login Keychain. ~/.claude/.credentials.json
+#  is the LINUX location: on a Mac it is either absent, or a stale leftover from
+#  an earlier container login. Seeding from that file is what made the sandbox
+#  report an expired token, and what made a /login on the host fail to help —
+#  a host login updates the Keychain, which that file never sees.
+#
+#  So read the Keychain first, fall back to the file, then give up and let
+#  Claude Code ask. Whatever lands here is a throwaway copy; see build_config().
+# ---------------------------------------------------------------------------
+seed_credentials() {
+    local dest="$CUR_BASE/.credentials.json"
+
+    # `security` exists only on macOS, so Linux skips straight to the file.
+    if command -v security >/dev/null 2>&1 \
+       && seed_in .credentials.json \
+              security find-generic-password -s "$KEYCHAIN_SERVICE" -w
+    then
+        # Cheap shape check. grep -q prints nothing, so the token stays unseen.
+        if grep -q claudeAiOauth "$dest"; then
+            echo "Login: seeded from the Keychain."
+            return 0
+        fi
+
+        rm -f "$dest"
+        echo "Login: the Keychain entry was not in the expected form; ignored."
+    fi
+
+    if [[ -f "$CFG_HOST/.credentials.json" ]]; then
+        copy_in .credentials.json
+        echo "Login: seeded from $CFG_HOST/.credentials.json"
+        return 0
+    fi
+
+    echo "Login: no token found. Run /login inside the sandbox."
+}
+
+
+# ---------------------------------------------------------------------------
+#  Build the container's ~/.claude as a throwaway copy.
+#
+#  Read the config strategy essay in lib/safer-common.sh first — it explains
+#  why this is a copy rather than a mount, and why that removes the hook risk
+#  instead of merely containing it.
+# ---------------------------------------------------------------------------
+build_config() {
+    local slug
+
+    config_root "$CFG_HOST" "$CFG_CONT" claude
+
+    # Rewritten when you run /effort, /model and friends.
+    copy_in settings.json       json
+    copy_in settings.local.json json
+
+    # Authentication. The token is a real writable FILE in the throwaway copy,
+    # so Claude Code can save its hourly renewal, and /login works inside the
+    # sandbox. It used to be a read-only single-file bind mount, which failed
+    # twice over: the readonly flag blocked the write, and a rename cannot
+    # replace a mount point — the same EBUSY fault described for settings.json
+    # at the top of this file. A session therefore died after about an hour, and
+    # the token could never be renewed.
+    #
+    # Read-only was never the thing protecting your Mac; the copy is. Neither
+    # your Keychain nor your file is reachable from the container, so whatever
+    # the agent writes here dies with the session. Reading the token stays
+    # possible, exactly as before — what makes a read harmless is the network,
+    # which gives a stolen token nowhere to go.
+    seed_credentials
+
+    # Your own commands, subagents, skills and instructions, so the sandbox
+    # behaves like your normal setup.
+    ro_back statusline-command.sh CLAUDE.md \
+            plugins commands agents skills hooks output-styles
+
+    # This project's transcript, so history persists. Only THIS project: the
+    # folder name is the project path with every character that is not a letter
+    # or digit replaced by a dash. Transcripts the agent writes for any other
+    # project land in the throwaway copy and are discarded.
+    slug="$(printf '%s' "$HOST_PATH" | sed 's/[^A-Za-z0-9]/-/g')"
+    rw_back "projects/$slug"
+
+    echo "History for this project: $CFG_HOST/projects/$slug"
+    echo "Config: throwaway copy — settings changed in the sandbox do not persist."
+}
+
+
+# =============================================================================
+#  Read the command line
+#
+#  Only --effort is handled here. Everything else is shared, so it goes to
+#  parse_common_arg. See section 11 of lib/safer-common.sh.
+# =============================================================================
+
+EFFORT=""
+
+while [[ $# -gt 0 ]]; do             # $# = how many arguments are left
+    case "$1" in
+        --effort)
+            if [[ $# -lt 2 ]]; then
+                echo "Error: --effort requires a LEVEL argument" >&2
+                exit 1
+            fi
+            # Validate here rather than passing a typo through to the tool,
+            # where it would either be ignored silently or produce a confusing
+            # message much later.
+            case "$2" in
+                low|medium|high|xhigh|max)
+                    EFFORT="$2"
+                    ;;
+                *)
+                    echo "Error: unknown effort level '$2'" >&2
+                    echo "Valid levels: low medium high xhigh max" >&2
+                    exit 1
+                    ;;
+            esac
+            shift 2
+            ;;
+
+        *)
+            parse_common_arg "$@"
+            shift "$ARGS_CONSUMED"
+            ;;
+    esac
+done
+
+safer_resolve_command
+
+# ---------------------------------------------------------------------------
+#  Effort level.
+#
+#  Optional. /effort works inside the sandbox, so this flag is mainly for
+#  unattended runs where nobody is there to type it.
+#
+#  BE AWARE: setting this environment variable OVERRIDES /effort for the whole
+#  session. Running /effort afterwards reports "Not applied" and changes
+#  nothing. Leave the flag off if you want to adjust effort while you work.
+# ---------------------------------------------------------------------------
+if [[ -n "$EFFORT" ]]; then
+    TOOL_ENV+=(--env "CLAUDE_CODE_EFFORT_LEVEL=$EFFORT")
+    echo "Effort level: $EFFORT (this session only)"
+fi
+
+
+# =============================================================================
+#  Assemble and run
+# =============================================================================
+
+safer_check_workdir          # sets HOST_PATH; build_config needs it
+safer_ensure_agent_image
+
+build_config
+apply_config_copies          # ~/.claude.json, registered with add_copy above
+
+safer_protect_paths
+safer_setup_network
+safer_run

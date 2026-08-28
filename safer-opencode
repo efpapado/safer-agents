@@ -1,0 +1,533 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  safer-opencode — run opencode in a locked-down container
+# =============================================================================
+#
+#  USAGE
+#      safer-opencode --ollama
+#      safer-opencode --ollama --ro ../../../core
+#      safer-opencode --rw ../../contrib
+#      safer-opencode --allow www.php.net
+#      safer-opencode --offline
+#      safer-opencode -- bash
+#
+#  FLAGS
+#      --add PATH      mount a host folder READ-ONLY, in addition to the
+#                      current directory. --ro means the same thing
+#      --rw PATH       mount a host folder read-WRITE. The agent can change
+#                      your Mac through it, so a folder outside the current
+#                      directory has to be confirmed
+#      --allow HOST    permit one extra network destination for this run only
+#      --ollama        reach a local Ollama server running on your Mac. This is
+#                      a WEAKER network mode — read the long comment above
+#                      start_ollama_forwarder() before using it
+#      --offline       no network at all (the agent cannot reach any model, so
+#                      this is only useful with `-- bash` for local analysis)
+#      -- COMMAND      run COMMAND instead of opencode
+#
+#  There is no --effort here: that is a Claude Code setting.
+#
+#  WHERE THE REST OF THE LOGIC IS
+#  The sandbox itself — the sealed network, the gatekeeper, hiding .git, the
+#  connection log — is in lib/safer-common.sh, shared with safer-claude and
+#  safer-codex. This file holds what is specific to opencode, which includes
+#  the whole Ollama forwarder, because no other tool uses it.
+#
+#  ---------------------------------------------------------------------------
+#  SETTINGS INSIDE THE SANDBOX
+#  ---------------------------------------------------------------------------
+#  Settings changed in the sandbox apply for the session and are then thrown
+#  away. Your Mac's config is never modified. See the config strategy essay in
+#  lib/safer-common.sh.
+#
+#  Session history does not persist: opencode keeps its sessions and messages
+#  in shared SQLite databases covering every project, and a sandbox limited to
+#  one project should not read the others.
+# =============================================================================
+
+set -euo pipefail
+
+
+# ---------------------------------------------------------------------------
+#  Find the folder this command lives in, and load the shared machinery.
+#
+#  BASH_SOURCE[0] is the path to this file. `dirname` strips the filename.
+#  `cd ... && pwd -P` turns it into a full path with all symlinks resolved.
+# ---------------------------------------------------------------------------
+SAFER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+TOOL="opencode"
+
+# shellcheck source=lib/safer-common.sh
+source "$SAFER_ROOT/lib/safer-common.sh"
+
+
+usage() {
+    echo "Usage: safer-opencode [--add PATH] [--rw PATH] [--allow HOST]"
+    echo "                      [--ollama] [--offline] [-- COMMAND ...]"
+    echo ""
+    echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
+    echo "  --rw PATH       mount a folder read-WRITE. The agent can change"
+    echo "                  your Mac through it, so ask for it by name. A"
+    echo "                  folder outside your project must be confirmed."
+    echo "  --allow HOST    allow one extra destination for this run only"
+    echo "  --ollama        reach the Ollama server on your Mac, inference only"
+    echo "  --offline       no network at all"
+    echo ""
+    echo "The folder you run in is always read-write. Inside every mounted"
+    echo "folder, .git and the paths in dangerous-paths.txt are covered so"
+    echo "the agent cannot write them. That list cannot be complete, so at"
+    echo "exit the run reports every auto-run file that appeared during the"
+    echo "session. Read it before you commit."
+}
+
+
+# =============================================================================
+#  What is specific to opencode
+# =============================================================================
+
+# The image name is deliberately NOT "agent-opencode". That is what the older
+# safe-agent launcher builds, from a different Dockerfile. Sharing the name
+# would let these commands silently reuse an image built by that older recipe —
+# one that may still contain git. A separate name keeps the two independent.
+IMAGE="safer-agent-opencode"
+DOCKERFILE="$DOCKER_DIR/Dockerfile.opencode"
+
+VERSION_COMMAND=(opencode --version)
+DEFAULT_COMMAND=(opencode)
+
+# opencode uses TWO folders: one for configuration, one for data.
+CFG_HOST="$HOME/.config/opencode"
+CFG_CONT="/home/agent/.config/opencode"
+DATA_HOST="$HOME/.local/share/opencode"
+DATA_CONT="/home/agent/.local/share/opencode"
+
+# Neither folder is mounted directly. See build_config() below.
+PROTECTED_ROOTS+=("$CFG_HOST" "$DATA_HOST")
+
+# Nothing to switch off by environment variable. opencode's update check is
+# controlled by a setting in opencode.json instead — see the tip printed at the
+# end of build_config().
+TOOL_ENV=()
+
+
+# ---------------------------------------------------------------------------
+#  The Ollama forwarder
+# ---------------------------------------------------------------------------
+
+# Set by --ollama.
+OLLAMA=0
+
+# The port a local Ollama server listens on. The same number on both sides: the
+# forwarder listens on it inside the sealed network and connects to it on your
+# Mac. The value is substituted into the forwarder's config, so changing it here
+# is enough.
+OLLAMA_PORT=11434
+
+# Image and rules for the forwarder. A separate image from the gatekeeper: the
+# gatekeeper runs tinyproxy, this runs nginx, and neither needs the other's
+# software.
+FORWARDER_IMAGE="safer-forwarder"
+OLLAMA_CONF="$PROXY_DIR/ollama.conf"
+
+
+# ---------------------------------------------------------------------------
+#  Build the container's opencode folders as throwaway copies.
+#
+#  Read the config strategy essay in lib/safer-common.sh first — it explains
+#  why these are copies rather than mounts, and why that removes the hook risk
+#  instead of merely containing it.
+# ---------------------------------------------------------------------------
+build_config() {
+    local rewritten
+
+    # --- configuration -----------------------------------------------------
+    config_root "$CFG_HOST" "$CFG_CONT" opencode-config
+
+    copy_in opencode.json  json
+    copy_in opencode.jsonc          # only if you have one
+    copy_in tui.json                # only if you have one
+
+    #  With --ollama, repoint the copied config at the forwarder. Your real
+    #  config file is untouched, so it keeps working on your Mac.
+    if [[ "$OLLAMA" -eq 1 ]]; then
+        rewritten=0
+        rewrite_ollama_host "$CUR_BASE/opencode.json"  && rewritten=1
+        rewrite_ollama_host "$CUR_BASE/opencode.jsonc" && rewritten=1
+
+        #  A config that ALREADY names the forwarder needs no rewrite and must
+        #  not draw a warning. Unlikely, since that host name only exists
+        #  inside the container, but a wrong warning sends you hunting the
+        #  wrong fault — which is the failure this whole branch exists to stop.
+        if [[ "$rewritten" -eq 0 ]] \
+           && grep -qs "//ollama:$OLLAMA_PORT" \
+                   "$CUR_BASE/opencode.json" "$CUR_BASE/opencode.jsonc"; then
+            rewritten=1
+        fi
+
+        if [[ "$rewritten" -eq 1 ]]; then
+            echo "Ollama: repointed the config copy to ollama:$OLLAMA_PORT"
+        else
+            #  Say this loudly. It is the difference between a working session
+            #  and a crash whose message names neither Ollama nor a host.
+            echo "" >&2
+            echo "WARNING: --ollama was given, but nothing in the config copy" >&2
+            echo "         pointed at localhost:$OLLAMA_PORT, so nothing was" >&2
+            echo "         repointed at the forwarder." >&2
+            echo "" >&2
+            echo "         opencode will use its own default, which is" >&2
+            echo "         localhost:$OLLAMA_PORT. Inside the container that is" >&2
+            echo "         the container itself, and there is no model server" >&2
+            echo "         there. Expect:" >&2
+            echo "" >&2
+            echo "             Unexpected server error." >&2
+            echo "" >&2
+            echo "         and no blocked host in the connection log, because" >&2
+            echo "         loopback never reaches the gatekeeper." >&2
+            echo "" >&2
+            echo "         Fix it in $CFG_HOST/opencode.json by writing the" >&2
+            echo "         base URL out in full, for example:" >&2
+            echo "" >&2
+            echo "             \"baseURL\": \"http://localhost:$OLLAMA_PORT/v1\"" >&2
+            echo "" >&2
+            echo "         That keeps working on your Mac, and this command" >&2
+            echo "         rewrites the copy to ollama:$OLLAMA_PORT." >&2
+            echo "" >&2
+        fi
+    else
+        #  Easy to forget, and the failure looks like a broken provider rather
+        #  than a missing flag.
+        echo "Note: no --ollama, so a local model server on your Mac is unreachable."
+    fi
+
+    # Both spellings: newer opencode uses the plural names, older releases used
+    # the singular. Whichever exist on your Mac get bound back.
+    ro_back agents commands modes plugins skills tools themes
+    ro_back agent command plugin
+    ro_back AGENTS.md
+
+    # --- data --------------------------------------------------------------
+    config_root "$DATA_HOST" "$DATA_CONT" opencode-data
+
+    # Provider credentials. Read-only: the agent must be able to READ them to
+    # authenticate, and what makes a read harmless is the network, which gives
+    # a stolen key nowhere to go.
+    ro_back auth.json
+
+    # NOT bound back: the SQLite session and message databases, logs and
+    # snapshots. Per-session, discarded on exit.
+    echo "Config: throwaway copy — settings and session history do not persist."
+    echo "Tip: set \"autoupdate\": false in $CFG_HOST/opencode.json to stop"
+    echo "     update checks reaching the network. The copy inherits it."
+}
+
+
+# ---------------------------------------------------------------------------
+#  Reach a local Ollama server running on your Mac.
+#
+#  THE PROBLEM
+#  The sealed network has no route to your Mac — that is the point of it. But a
+#  local model server runs ON your Mac, on 127.0.0.1:11434, and inside the
+#  container 127.0.0.1 means the container itself. So local models are simply
+#  unreachable.
+#
+#  THE WRONG FIX
+#  Allowing host.docker.internal through the gatekeeper. That works, but the
+#  gatekeeper filters by HOSTNAME and cannot restrict ports for plain HTTP, so
+#  the agent would be able to reach EVERY port on your Mac — a local database,
+#  a search server, an admin interface. That is the host reachability this whole
+#  design closes, handed back for one service.
+#
+#  THE FIX USED HERE
+#  A second small container, on the sealed network as "ollama", which forwards
+#  to exactly one port on your Mac. Nothing else on your Mac is reachable
+#  through it — not another port, not another host.
+#
+#  The agent reaches it by container name: http://ollama:11434
+#
+#  WHY IT IS A FILTER AND NOT A PIPE
+#  The first version of this used socat, a relay that copies bytes and reads
+#  nothing. That was wrong. Ollama's HTTP interface is also its control panel,
+#  with no password on it, and one of its requests — /api/pull — makes your Mac
+#  connect to any registry host the caller names. A pipe hands that out: the
+#  agent could reach any address it likes, with text of its choosing in the
+#  path, without the gatekeeper ever seeing it.
+#
+#  So the forwarder runs nginx with a short list of permitted request paths:
+#  ask the model a question, get an embedding, list what is installed. Anything
+#  else is refused with 403 and written to connection_logs/. The rules are in
+#  proxy/ollama.conf, which explains each one.
+#
+#  THREE THINGS YOU MUST KNOW
+#
+#  1. Ollama may need to be bound to a wider address.
+#
+#     By default it listens on 127.0.0.1 only. Try --ollama as it is first —
+#     depending on your Docker Desktop version this may already work, because
+#     Docker Desktop forwards these connections in a way that arrives on your
+#     Mac as if it came from your Mac. If, and only if, the agent cannot reach
+#     the model:
+#
+#         launchctl setenv OLLAMA_HOST 0.0.0.0:11434
+#
+#     then restart Ollama. Do not do this pre-emptively: it also exposes Ollama
+#     — unauthenticated — to everything else on your local network. If you do
+#     need it, block port 11434 inbound in the macOS firewall.
+#
+#  2. CLOUD models are outside this sandbox entirely.
+#
+#     If a model already installed on your Mac is a cloud-backed one (a name
+#     ending in -cloud), then using it makes YOUR MAC connect to ollama.com and
+#     send the prompt there. That is invisible to the gatekeeper and absent from
+#     the allowlist, because the connection is not the container's.
+#
+#     What the filter does do is stop the agent adding one: /api/pull is
+#     refused, and Ollama's API does not download models by itself. The set of
+#     usable models is therefore frozen to what `ollama list` shows before you
+#     start. warn_about_cloud_models() checks it for you and prints what it
+#     finds. If you want a hard guarantee instead of a checked list, run a
+#     second Ollama daemon with its own OLLAMA_MODELS folder and no sign-in,
+#     and point --ollama at that.
+#
+#  3. Only REFUSED requests appear in connection_logs/, and only their paths.
+#
+#     Permitted inference is not logged, and no request body is ever logged —
+#     that is where the prompt and your code live.
+# ---------------------------------------------------------------------------
+start_ollama_forwarder() {
+    OLLAMA_NAME="safer-opencode-ollama-$$"
+
+    if [[ ! -f "$OLLAMA_CONF" ]]; then
+        echo "Error: forwarder config not found: $OLLAMA_CONF" >&2
+        exit 1
+    fi
+
+    ensure_forwarder_image
+
+    #  Generate a copy of the rules with the port number filled in, the same
+    #  way the allowlist is prepared. nginx configuration files cannot read
+    #  environment variables, so the value has to be substituted here.
+    #  $$ is this script's process id, so two runs at once do not clash.
+    EFFECTIVE_OLLAMA_CONF="$PROXY_DIR/.ollama.effective.$$.conf"
+    sed "s/__OLLAMA_PORT__/$OLLAMA_PORT/g" "$OLLAMA_CONF" \
+        > "$EFFECTIVE_OLLAMA_CONF"
+    chmod 0644 "$EFFECTIVE_OLLAMA_CONF"     # the forwarder must be able to read it
+    check_mount_path "$EFFECTIVE_OLLAMA_CONF"
+
+    #  --add-host maps host.docker.internal to your Mac explicitly, rather than
+    #  relying on Docker Desktop providing the name.
+    #
+    #  The rules are mounted read-only, so nothing inside this container can
+    #  change what it is enforcing.
+    #
+    #  -c says which config file to read. Everything else — the port, the
+    #  destination, what is permitted — is in that file.
+    docker run -d \
+        --name "$OLLAMA_NAME" \
+        --network "$NET_NAME" \
+        --network-alias ollama \
+        --add-host "host.docker.internal:host-gateway" \
+        --read-only \
+        --tmpfs /tmp \
+        --cap-drop ALL \
+        --security-opt no-new-privileges \
+        --pull=never \
+        --mount "type=bind,src=$EFFECTIVE_OLLAMA_CONF,dst=/etc/nginx/ollama.conf,readonly" \
+        "$FORWARDER_IMAGE" \
+        nginx -c /etc/nginx/ollama.conf >/dev/null
+
+    #  It needs the normal network to reach your Mac. The agent stays off it.
+    docker network connect bridge "$OLLAMA_NAME" >/dev/null
+
+    echo "Ollama: forwarding ollama:$OLLAMA_PORT -> your Mac's $OLLAMA_PORT"
+    echo "        Inference requests only; model management is refused."
+
+    warn_about_cloud_models
+}
+
+# ---------------------------------------------------------------------------
+#  Make sure the forwarder image exists.
+#
+#  Separate from the gatekeeper image on purpose: the gatekeeper needs tinyproxy
+#  and the forwarder needs nginx, and neither should carry software it does not
+#  run. safer-claude and safer-codex never build this one.
+# ---------------------------------------------------------------------------
+ensure_forwarder_image() {
+    if docker image inspect "$FORWARDER_IMAGE" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Building the Ollama forwarder image ($FORWARDER_IMAGE)..."
+    docker build \
+        -f "$DOCKER_DIR/Dockerfile.forwarder" \
+        -t "$FORWARDER_IMAGE" \
+        "$DOCKER_DIR"
+}
+
+# ---------------------------------------------------------------------------
+#  Name the cloud-backed models installed on your Mac, before the agent starts.
+#
+#  Why this is worth doing: the forwarder stops the agent INSTALLING a model,
+#  so the usable set is whatever is already there. That makes the risk a
+#  checkable list rather than an open question — but only if someone checks it.
+#  So the script checks, and prints the answer where you cannot miss it.
+#
+#  A cloud model looks ordinary from inside the container. Using it makes YOUR
+#  MAC connect to ollama.com and send the prompt. The gatekeeper never sees it,
+#  the allowlist does not govern it, and connection_logs/ will not show it.
+#
+#  This is advice, not enforcement. It does not block the run.
+# ---------------------------------------------------------------------------
+warn_about_cloud_models() {
+    local cloud
+
+    # No Ollama CLI on this Mac? Then there is nothing to inspect. Perhaps the
+    # daemon runs elsewhere, or under a different name.
+    if ! command -v ollama >/dev/null 2>&1; then
+        echo "        (no ollama command found here, so installed models were"
+        echo "         not checked)"
+        return 0
+    fi
+
+    # `|| true` because this fails when the daemon is not running, which is not
+    # an error worth stopping for. awk prints the first column, the model name.
+    cloud="$(ollama list 2>/dev/null | awk '/-cloud/ {print $1}' || true)"
+
+    if [[ -z "$cloud" ]]; then
+        echo "        No cloud-backed models installed, so every request stays"
+        echo "        on your Mac."
+        return 0
+    fi
+
+    echo ""
+    echo "  WARNING: cloud-backed models are installed on your Mac:"
+    printf '           %s\n' $cloud
+    echo ""
+    echo "  If the agent uses one of these, your Mac sends the prompt to"
+    echo "  ollama.com. That connection is not the container's, so the"
+    echo "  allowlist does not apply to it and connection_logs/ will not"
+    echo "  record it. Project code can leave this way."
+    echo ""
+    echo "  To close it: \`ollama rm <name>\` for each, or run a second Ollama"
+    echo "  daemon with its own OLLAMA_MODELS folder and no sign-in, and point"
+    echo "  --ollama at that instead."
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+#  Point a copied opencode config at the forwarder instead of at localhost.
+#
+#  Your opencode.json says something like http://localhost:11434/v1, which is
+#  correct on your Mac and wrong inside a container, where localhost is the
+#  container. Because the config the container sees is a throwaway COPY, the
+#  address can be rewritten in the copy and your real file is left alone.
+# ---------------------------------------------------------------------------
+#  Returns 0 if it CHANGED something, 1 if it did not. The caller must report
+#  the difference. A rewrite that quietly matched nothing is the worst outcome
+#  here: opencode then keeps its own default of localhost:11434, which inside
+#  the container is the container itself, and the failure surfaces much later as
+#
+#      Error: Unexpected server error. Check server logs for details.
+#
+#  with no blocked host in the connection log, because loopback never reaches
+#  the gatekeeper. This function used to return 0 either way, and the caller
+#  printed "repointed the config copy" regardless of whether it had.
+rewrite_ollama_host() {
+    local f="$1"
+
+    [[ -f "$f" ]] || return 1
+
+    #  Not `sed -i`: the in-place flag takes an argument on macOS and does not
+    #  on Linux, so write to a new file and move it into place instead.
+    sed -e "s#//localhost:$OLLAMA_PORT#//ollama:$OLLAMA_PORT#g" \
+        -e "s#//127\.0\.0\.1:$OLLAMA_PORT#//ollama:$OLLAMA_PORT#g" \
+        "$f" > "$f.new"
+
+    #  cmp -s is quiet and only reports whether the two files differ.
+    if cmp -s "$f" "$f.new"; then
+        rm -f "$f.new"
+        return 1
+    fi
+
+    mv "$f.new" "$f"
+    chmod 0600 "$f"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+#  Called by safer_setup_network() once the sealed network exists.
+#
+#  The shared library looks for a function with this exact name and calls it if
+#  it is defined. That is how a per-tool extra container joins the network
+#  without the library needing to know anything about Ollama.
+# ---------------------------------------------------------------------------
+safer_extra_network_setup() {
+    if [[ "$OLLAMA" -eq 1 ]]; then
+        start_ollama_forwarder
+    fi
+}
+
+
+# =============================================================================
+#  Read the command line
+#
+#  Only --ollama is handled here. Everything else is shared, so it goes to
+#  parse_common_arg. See section 11 of lib/safer-common.sh.
+# =============================================================================
+
+while [[ $# -gt 0 ]]; do             # $# = how many arguments are left
+    case "$1" in
+        --ollama)
+            OLLAMA=1
+            shift
+            ;;
+
+        *)
+            parse_common_arg "$@"
+            shift "$ARGS_CONSUMED"
+            ;;
+    esac
+done
+
+safer_resolve_command
+
+# ---------------------------------------------------------------------------
+#  --ollama needs a network, so it cannot be combined with --offline. Say so
+#  rather than starting a forwarder nothing can reach.
+# ---------------------------------------------------------------------------
+if [[ "$OLLAMA" -eq 1 && "$OFFLINE" -eq 1 ]]; then
+    echo "Error: --ollama and --offline contradict each other." >&2
+    echo "--offline gives the container no network, so nothing can reach Ollama." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+#  Let the agent reach the forwarder directly instead of through the gatekeeper.
+#
+#  Without this, a client that honours the proxy variables — opencode does —
+#  sends its request for http://ollama:11434 to the gatekeeper, which refuses
+#  it, because `ollama` is not an allowlisted internet host and must never
+#  become one.
+#
+#  This widens nothing. "Direct" still means "somewhere on the sealed network":
+#  the name `ollama` resolves only to the forwarder, and the forwarder has one
+#  fixed destination.
+# ---------------------------------------------------------------------------
+if [[ "$OLLAMA" -eq 1 ]]; then
+    NO_PROXY_HOSTS="$NO_PROXY_HOSTS,ollama"
+fi
+
+
+# =============================================================================
+#  Assemble and run
+# =============================================================================
+
+safer_check_workdir          # sets HOST_PATH
+safer_ensure_agent_image
+
+build_config
+apply_config_copies          # nothing registered for opencode; harmless
+
+safer_protect_paths
+safer_setup_network          # calls safer_extra_network_setup for --ollama
+safer_run

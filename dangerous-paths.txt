@@ -1,0 +1,477 @@
+# =============================================================================
+#  dangerous-paths.txt — files and folders the agent must not be able to write
+# =============================================================================
+#
+#  WHAT THIS FILE IS FOR
+#  The project folder is mounted read-write, because the agent has to edit your
+#  code. But a handful of paths inside a code tree are not code: they are
+#  instructions that something on YOUR MAC runs later. A shell script in
+#  .githooks runs at your next commit. A .envrc runs when you cd into the
+#  folder. A .vscode/tasks.json can run when you open the project. None of
+#  these need the agent's help, and all of them turn "the agent edited a file"
+#  into "the agent ran a command on my Mac".
+#
+#  Every path listed here is covered by a mount, so the agent cannot write it.
+#
+#  WHY A LIST AND NOT A RULE
+#  The config folders of the three tools are handled the other way round: the
+#  container gets a throwaway COPY, and only what must be shared is bound back.
+#  That is a default-deny design and it is much better than a list. See
+#  SECTION 9 of lib/safer-common.sh for why.
+#
+#  It cannot be done here. A copy of the project folder would mean the agent's
+#  work never reaches your Mac, which is the entire point of the mount. So this
+#  half has to be a list, with the weakness a list always has: it protects the
+#  paths someone thought of. When you learn about a new one, add it here.
+#
+#  ---------------------------------------------------------------------------
+#  FORMAT
+#  ---------------------------------------------------------------------------
+#      <action>   <type>   <path>
+#
+#  Columns are separated by spaces. Blank lines and lines starting with # are
+#  ignored.
+#
+#  ACTION — what the container sees
+#      hide   an empty, unwritable placeholder. The real contents are not
+#             visible to the agent at all. Use this when the agent has no
+#             legitimate reason to read the path.
+#      pin    the real contents, read-only. The agent can read them and cannot
+#             change them. Use this when the path holds something the agent may
+#             genuinely need to see.
+#      warn   nothing at all. The path is left fully writable, and the exit
+#             scan reports it if it was written during the session. Use this
+#             for a file the agent MUST be able to edit but that still runs
+#             something on your Mac later — package.json is the type case.
+#             This is the only action that reports a CHANGE rather than an
+#             appearance, which is what such a file needs: it already exists,
+#             so its presence proves nothing.
+#
+#             A `warn` entry must name a FILE. See section 7b of
+#             lib/safer-common.sh for why a folder would not do what you mean.
+#
+#  TYPE — what to put there when the path does NOT exist
+#      dir    a directory
+#      file   a file
+#      nested  a path inside a folder the TOOL ITSELF writes. Pinned wherever
+#              it already exists. Pre-empted only when its parent folder
+#              exists, and the parent is NEVER covered. So in a project with no
+#              .opencode at all, .opencode/plugin is not pre-empted and the
+#              agent could create it. That residue is the price of the tool
+#              working; see the control-planes note below.
+#
+#      glob   a name pattern, matched against files. Existing matches are
+#             covered; nothing is created. See the limitation below.
+#
+#  PATH — a name, or a relative path with slashes, such as .github/workflows
+#
+#  KNOWN LIMIT — `nested` can only describe a FOLDER.
+#  Pre-emption of a nested entry is hardcoded to create a directory
+#  (pin_dangerous_paths_in_tree in lib/safer-common.sh). Every nested entry
+#  below is a folder, so nothing is wrong today. But a nested FILE cannot be
+#  expressed. Writing
+#
+#      pin  nested  .claude/settings.local.json
+#
+#  would make Docker create a DIRECTORY with that name inside your project, and
+#  the tool would then fail to read its own settings. If a nested file is ever
+#  needed, add a fifth type — `nested-file` — to the library first. Do not just
+#  add the entry.
+#
+#  ---------------------------------------------------------------------------
+#  WHERE EACH ENTRY IS APPLIED
+#  ---------------------------------------------------------------------------
+#  For every mounted tree — the project folder and each --add / --rw / --ro
+#  folder:
+#
+#    1. EVERY existing occurrence, at any depth, is hidden or pinned. A
+#       .devcontainer inside a contrib module is covered as well as one at the
+#       top.
+#
+#    2. If the path does NOT exist at the top of the tree, an empty unwritable
+#       placeholder is mounted there anyway. This is the important half. A
+#       read-only mount over a file that exists does nothing about the agent
+#       CREATING that file — and an agent that writes a .envrc into a project
+#       that never had one has achieved exactly what the list is meant to stop.
+#
+#       Step 2 has a visible side effect. Docker must have something to mount
+#       on, so it creates the empty file or folder in your project on the Mac.
+#       While the session runs, `git status` in another terminal shows these as
+#       new files. They are placeholders, not the agent's work. The exit trap
+#       deletes them again, but only while they are still empty. A run killed
+#       with `kill -9` skips that step and leaves them behind; delete those by
+#       hand.
+#
+#       The more entries this file carries, the more placeholders appear. That
+#       is the running cost of every addition, and it is the reason not to add
+#       a name "just in case".
+#
+#  A --rw FOLDER GETS ALL OF THIS TOO. Step 1 and step 2 both run there, along
+#  with the .git masking. A --rw tree is not an unguarded tree. What it does
+#  not get is any protection for its ordinary CONTENTS — this file is a list of
+#  names, and everything not named is writable. That is why --rw on a folder
+#  outside your project now asks you to confirm it.
+#
+#  A read-only --add / --ro folder gets step 1 for `hide` entries only. A `pin`
+#  on something already read-only is a mount that changes nothing, and nothing
+#  can be created in a read-only tree, so step 2 is skipped entirely.
+#
+#  ---------------------------------------------------------------------------
+#  WHAT THIS DOES NOT COVER — read this before trusting it
+#  ---------------------------------------------------------------------------
+#  Step 2 needs a name in advance, and it only pre-empts the top of the tree.
+#  So three things get through, and all three are permanent properties of a
+#  list, not bugs waiting to be fixed:
+#
+#    * A glob entry that matches nothing yet. The agent can still create
+#      something.code-workspace, because no mount can be prepared for a name
+#      nobody knows.
+#
+#    * A path created DURING the session, deep in the tree. Nothing stops the
+#      agent writing web/modules/custom/mymod/.vscode/tasks.json.
+#
+#    * The next dangerous filename nobody has thought of yet. Every tool that
+#      learns to auto-run a new file adds one, and this file is behind until
+#      somebody notices.
+#
+#  The second one matters less than it looks. VS Code runs tasks from the
+#  folder you open, and direnv loads the directory you enter — so it is the
+#  top-level copies that do the damage, and those are pre-empted. But these are
+#  real limits, not theoretical ones.
+#
+#  WHAT COVERS THEM INSTEAD: THE EXIT SCAN.
+#  Section 7b of lib/safer-common.sh records what every writable tree held at
+#  launch, and lists what is new at exit — anything matching this file at any
+#  depth, plus any new file with the execute bit. It blocks nothing. It exists
+#  because these three holes cannot be closed by a mount, and because "read the
+#  diff before you commit" needs something to point at, including for files
+#  that no diff shows because they are gitignored.
+#
+#  Read that report. It is the other half of this file.
+#
+#  ---------------------------------------------------------------------------
+#  THE OPERATING POLICY, AND WHICH ENTRIES DEPEND ON IT
+#  ---------------------------------------------------------------------------
+#  Developer-stated, 2026-08-27, and NOT enforced by these scripts:
+#
+#      The tools are never run natively in a real project folder. On the Mac,
+#      claude, codex and opencode are started only in empty folders, and only
+#      to change settings or update hooks. Developers are warned and are
+#      responsible for keeping to it.
+#
+#  This matters because every entry here is defined by its TRIGGER — the thing
+#  on your Mac that reads the file and runs what is in it. The policy removes
+#  exactly one trigger: a native agent run inside the project folder. It
+#  removes no other.
+#
+#  So the entries below are in two groups, and the grouping is the point.
+#
+#      GROUP A — triggers that survive the policy. Git, the shell, the editor,
+#      the package managers, the task runners. You still do all of that in the
+#      project folder on your Mac. These entries are load-bearing.
+#
+#      GROUP B — triggers that need a native agent run in the project folder.
+#      Under the policy nothing reads these. They are kept because the policy
+#      is a habit, and this file already argues, about `direnv allow`, that
+#      habits get typed through. The most likely failure is someone who runs
+#      the tool natively in a project to compare it against the sandbox.
+#
+#  If the policy ever changes, group B becomes load-bearing again. Do not
+#  delete it; it costs almost nothing where it stands.
+#
+#  ---------------------------------------------------------------------------
+#  WHAT IS DELIBERATELY NOT HERE
+#  ---------------------------------------------------------------------------
+#  .git is not in this list. It is handled by its own code in
+#  lib/safer-common.sh, which also deals with .git as a FILE — the pointer used
+#  by submodules and worktrees — and with a .git that is a symlink. That case
+#  is specific enough to keep separate.
+#
+#  CLAUDE.md and AGENTS.md are not here either, and that is on purpose.
+#  Nothing in them executes. They are instructions to the agent, so pinning
+#  them read-only defends against nothing: an agent writing its own instruction
+#  file learns nothing it did not already know. What it would cost is real —
+#  agents legitimately update those files, and you read the diff. The risk they
+#  carry is prompt injection from text ALREADY in the repository, and read-only
+#  does nothing about that.
+#
+#  BUILD MANIFESTS ARE NOT HERE, AND THIS IS THE HARDEST CALL IN THE FILE.
+#  composer.json, package.json, pyproject.toml and setup.py all run commands on
+#  your Mac. A postinstall script in package.json fires at your next
+#  `npm install`. That is the same class of threat as .envrc.
+#
+#  They are still left out, because the agent must be able to edit them. A
+#  dependency change is ordinary work, and pinning these would break it in
+#  every project. There is no version of this entry that is both safe and
+#  usable, so the defence moves elsewhere:
+#
+#      * They are `warn` entries below, so the exit scan names them whenever
+#        they are written during a session.
+#      * Install with scripts disabled on the host, as a habit:
+#            npm ci --ignore-scripts
+#            composer install --no-scripts
+#      * Read the diff of these files first, before you read anything else.
+#
+#  .claude/settings.local.json IS NOT HERE, AND IT USED TO LOOK LIKE THE WORST
+#  GAP IN THE FILE. It holds hooks and MCP entries, and it is normally
+#  gitignored, so it is the one path here that could change without appearing
+#  in any diff you review. Three things decide it:
+#
+#    1. Its trigger is a native agent run in the project folder — group B. The
+#       operating policy above says that does not happen.
+#    2. Claude Code WRITES this file, inside the container, every time you
+#       approve a permission for the project. Covering it read-only would break
+#       that button in every session, for a threat the policy already removes.
+#       This is the same fault that `pin dir .opencode` caused; see below.
+#    3. `nested` cannot express a file anyway. See the KNOWN LIMIT above.
+#
+#    So it is left writable and handed to the exit scan instead, as a `warn`
+#    entry, which names it if it changes and costs nothing when it does not. If
+#    the operating policy is ever dropped, revisit this — starting with the
+#    KNOWN LIMIT.
+# =============================================================================
+
+
+# #############################################################################
+#  GROUP A — triggers that do not need an agent
+#
+#  Every entry below fires from something you do on your Mac anyway: commit,
+#  cd, open the editor, install dependencies, type make. The operating policy
+#  does not touch any of it. This is the load-bearing half of the file.
+# #############################################################################
+
+# -----------------------------------------------------------------------------
+#  Version control, and things that run at commit time
+# -----------------------------------------------------------------------------
+#  The .githooks convention: a tracked hooks folder, activated by
+#  core.hooksPath. A script written here runs on your Mac at your next commit.
+#  Hidden rather than pinned: git does not run inside the container at all, so
+#  the agent has no use for it.
+hide   dir    .githooks
+
+#  husky is the same idea with a different folder name, and it is the one most
+#  JavaScript projects actually use. It sets core.hooksPath to .husky, so a
+#  script written there runs at your next commit exactly as .githooks does.
+#  Hidden for the same reason.
+hide   dir    .husky
+
+#  pre-commit runs at your next commit, and it is worse than a plain hook: the
+#  config names remote repositories, and pre-commit CLONES and RUNS them. So a
+#  changed line here fetches and executes code that is not in your repository
+#  and not in your diff. Pinned rather than hidden, because the agent may
+#  reasonably need to read which checks a project runs.
+pin    file   .pre-commit-config.yaml
+
+
+# -----------------------------------------------------------------------------
+#  Automatic environment loaders
+# -----------------------------------------------------------------------------
+#  direnv runs .envrc on your Mac the moment you cd into the folder. No command
+#  typed, no file opened. The most dangerous entry on this list.
+#
+#  direnv does refuse an .envrc it has not seen before until you run
+#  `direnv allow`. That is a real brake — but it is a habit, and habits get
+#  typed through.
+pin    file   .envrc
+
+#  mise is direnv's successor for many people. It loads environment variables
+#  and task definitions on cd, and its tasks are shell commands. Both spellings
+#  are read; the dotted one wins.
+pin    file   .mise.toml
+pin    file   mise.toml
+
+
+# -----------------------------------------------------------------------------
+#  Editors and development environments
+# -----------------------------------------------------------------------------
+#  .devcontainer/devcontainer.json has initializeCommand, which runs on the
+#  HOST — not in the container it describes.
+pin    dir    .devcontainer
+
+#  .vscode/tasks.json can carry "runOptions": { "runOn": "folderOpen" }, which
+#  runs when you open the project. settings.json can point tooling at a
+#  different binary. Pinned rather than hidden, because your own editor
+#  settings are worth letting the agent read.
+pin    dir    .vscode
+
+#  The JetBrains equivalent: run configurations that execute on your Mac.
+pin    dir    .idea
+
+#  A workspace file carries the same tasks and settings as .vscode. Existing
+#  ones are pinned; a new one cannot be pre-empted, because its name is not
+#  known in advance. This is the glob limitation described above, and it is
+#  what the exit scan is for.
+pin    glob   *.code-workspace
+
+
+# -----------------------------------------------------------------------------
+#  Package managers — configuration and credentials
+# -----------------------------------------------------------------------------
+#  These do not execute by themselves. They decide WHERE your next install
+#  fetches code from, and whether that code's own scripts are allowed to run.
+#  A changed registry line plus one `npm install` is remote code execution on
+#  your Mac, and the manifest you actually read in the diff is untouched.
+#
+#  The agent has no legitimate need to write any of them. It has a fair need to
+#  read them, so they are pinned rather than hidden.
+pin    file   .npmrc
+pin    file   .yarnrc
+pin    file   .yarnrc.yml
+
+#  pnpm hooks: plain JavaScript, executed by pnpm during dependency resolution.
+#  Both spellings exist across versions.
+pin    file   .pnpmfile.cjs
+pin    file   pnpmfile.cjs
+
+#  Composer reads a project-level auth.json for registry credentials. Note this
+#  entry is broad: it matches ANY auth.json at any depth, including ones that
+#  belong to something else. Read-only is harmless for all of them.
+pin    file   auth.json
+
+
+# -----------------------------------------------------------------------------
+#  Task runners — the ones you type yourself
+# -----------------------------------------------------------------------------
+#  These run on your Mac when you type one short command in the project folder.
+#  That is a weaker trigger than .envrc, which needs nothing typed at all, but
+#  it is a strong habit and nobody reads a Makefile before running it.
+#
+#  THIS IS THE GROUP MOST LIKELY TO GET IN YOUR WAY. Unlike .envrc, these are
+#  sometimes ordinary project files that the agent has a real reason to edit.
+#  If that is your workflow, delete the entry — the same trade the CI block
+#  below offers. The exit scan still names the file if it changes.
+#
+#  CASE. `make` also reads a lowercase `makefile`, and `just` also reads
+#  `Justfile` and `JUSTFILE`. On a case-insensitive macOS volume those are the
+#  same file as the entry below, so one line covers them all. On a
+#  case-sensitive volume they are not. Add the spellings you use.
+pin    file   Makefile
+pin    file   GNUmakefile
+pin    file   justfile
+pin    file   Rakefile
+pin    file   Taskfile.yml
+pin    file   Taskfile.yaml
+
+#  `vagrant up` executes this file as Ruby, on your Mac.
+pin    file   Vagrantfile
+
+
+# -----------------------------------------------------------------------------
+#  CI definitions
+# -----------------------------------------------------------------------------
+#  These never run on your Mac, so they are not the same class of problem. Two
+#  reasons they are here anyway: CI has credentials your container does not,
+#  and a changed workflow file is easy to miss in a large diff.
+#
+#  Remove these three if your workflow needs the agent to edit CI.
+pin    dir    .github/workflows
+pin    file   .gitlab-ci.yml
+pin    file   Jenkinsfile
+
+
+# #############################################################################
+#  GROUP B — triggers that need a native agent run in the project folder
+#
+#  Under the operating policy described at the top of this file, nothing on
+#  your Mac reads any of these. They are kept as defence in depth, for the run
+#  that happens anyway. Read that section before deleting anything here.
+# #############################################################################
+
+# -----------------------------------------------------------------------------
+#  Agent control planes
+# -----------------------------------------------------------------------------
+#  Project-level settings for the three tools. Hooks and MCP server entries in
+#  these start processes. Inside the container that is contained — but the next
+#  time you run the tool on your Mac in this folder, it is not.
+#
+#  Pinned rather than hidden: a project's own commands, agents and skills are
+#  useful, and the agent should be able to read them.
+pin    file   .mcp.json
+# ---------------------------------------------------------------------------
+#  THE AGENT CONTROL PLANES — narrow, not whole
+#
+#  These three used to be
+#
+#      pin    dir    .claude
+#      pin    dir    .codex
+#      pin    dir    .opencode
+#
+#  which was wrong, and broke opencode on its first real run. A project-level
+#  .opencode is not only a place an attacker plants things; it is where opencode
+#  keeps its own housekeeping. It tried to create <project>/.opencode/.gitignore
+#  and died:
+#
+#      Unknown: FileSystem.writeFile (.../.opencode/.gitignore)
+#
+#  The lesson generalises. A folder the TOOL writes cannot be pinned whole. So
+#  pin only the children that make the HOST run code later, and leave the folder
+#  itself writable.
+#
+#  Which children those are: plugins and custom tools are executable code that
+#  the tool loads. Commands and agent definitions are prompts. Prompts are left
+#  out for the same reason CLAUDE.md and AGENTS.md are left out — see the
+#  "deliberately not here" section above. Nothing there executes.
+# ---------------------------------------------------------------------------
+pin    nested .opencode/plugin
+pin    nested .opencode/plugins
+pin    nested .opencode/tool
+pin    nested .opencode/tools
+
+#  Claude Code writes <project>/.claude/settings.local.json when you approve a
+#  permission for a project, so .claude cannot be pinned whole either. That
+#  file is deliberately left writable; the reasoning is in the "deliberately
+#  not here" section above, and the exit scan reports it if it changes.
+pin    nested .claude/hooks
+pin    nested .claude/plugins
+
+#  .codex is still pinned WHOLE, and that is a deliberate difference. There is
+#  no evidence it writes into a project-level .codex, so removing the protection
+#  would be trading a real control for a guess. If safer-codex ever fails with a
+#  write error naming this folder, that is what happened — narrow it then, the
+#  same way as the two above.
+pin    dir    .codex
+pin    file   opencode.json
+pin    file   opencode.jsonc
+
+
+# #############################################################################
+#  GROUP C — watched, never covered
+#
+#  These are files the agent has a real reason to edit, that still make
+#  something run on your Mac later. Covering them would break ordinary work, so
+#  they are not covered. The exit scan names them whenever a session writes
+#  one.
+#
+#  This group costs nothing. A `warn` entry mounts nothing, creates no
+#  placeholder, and cannot break a tool. So the bar for adding one is low: if
+#  you are unsure whether a name belongs in group A, put it here first.
+#
+#  The one cost is noise. `-newer` matches anything written during the session,
+#  so a run that rewrites vendor/ or node_modules/ will list every package
+#  manifest under them. The report caps each list; read the count.
+# #############################################################################
+
+#  Lifecycle scripts. A "postinstall" line here runs on your Mac at your next
+#  install, and the install is the trigger you type without thinking.
+warn   file   package.json
+warn   file   composer.json
+warn   file   pyproject.toml
+warn   file   setup.py
+
+#  Claude Code's project-level settings, which hold hooks and MCP entries and
+#  are normally gitignored, so a change never reaches a diff. Left writable
+#  because Claude Code writes it inside the container when you approve a
+#  permission. See the "deliberately not here" section above.
+warn   file   .claude/settings.local.json
+
+#  Not an execution path — a concealment one. A rule added here hides a planted
+#  file from a plain `git status`. Use `git status --ignored` after any session
+#  that touched it.
+warn   file   .gitignore
+
+#  `docker compose up` runs on your Mac, and a compose file can mount host
+#  paths and ask for privileges. The agent edits these legitimately.
+warn   file   docker-compose.yml
+warn   file   docker-compose.yaml
+warn   file   compose.yml
+warn   file   compose.yaml

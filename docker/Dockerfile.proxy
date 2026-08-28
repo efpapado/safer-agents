@@ -1,0 +1,130 @@
+# =============================================================================
+#  Dockerfile.proxy — the gatekeeper container
+# =============================================================================
+#
+#  WHAT THIS IS FOR
+#  The agent container is placed on a sealed Docker network: it can reach the
+#  containers on that network and nothing else. No internet, no access to your
+#  Mac, no other containers.
+#
+#  This image is the one exception. A container built from it joins that sealed
+#  network AND a normal network, so it is the only door out. Every connection
+#  the agent makes goes through it, and it refuses any destination that is not
+#  on the allowlist.
+#
+#          ┌─ sealed network ─────────┐
+#          │  ┌───────┐               │     ┌───────┐
+#          │  │ agent │ ────────────► │     │ proxy │ ──► allowed hosts only
+#          │  └───────┘               │     └───┬───┘
+#          │  no other route out      │         │
+#          └──────────────────────────┘─────────┘
+#                                        also on the normal network
+#
+#  WHY A SEPARATE CONTAINER AND NOT A FIREWALL INSIDE THE AGENT
+#  A firewall needs root and elevated privileges. The agent container is
+#  deliberately run with neither (--cap-drop ALL, --user, no-new-privileges).
+#  Adding them back to install a firewall would undo protections we want. So
+#  the control has to sit outside the agent's container.
+#
+#  ONE IMAGE, ALL THREE COMMANDS
+#  safer-claude, safer-codex and safer-opencode all use this. Nothing in it is
+#  tool-specific: what differs between the tools is the allowlist, which is a
+#  file mounted at run time, not part of the image.
+#
+#  BUILD
+#  Whichever command you run builds it for you, the first time only:
+#      cd docker && docker build -f Dockerfile.proxy -t safer-gatekeeper .
+#
+#  The configuration is NOT baked in. tinyproxy.conf and the allowlist are
+#  mounted from the proxy/ folder at run time, so you can edit an allowlist and
+#  just re-run — no rebuild needed.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  Base image
+# -----------------------------------------------------------------------------
+#  Alpine Linux, chosen because it is tiny (about 8 MB) and because it is an
+#  official image. Pulling a ready-made third-party "tinyproxy" image from
+#  Docker Hub would mean trusting a name we do not control — the whole point of
+#  this container is to be trustworthy, so we build it ourselves from an
+#  official base.
+FROM alpine:3.20
+
+
+# -----------------------------------------------------------------------------
+#  Install tinyproxy
+# -----------------------------------------------------------------------------
+#  tinyproxy is a small HTTP/HTTPS forward proxy. It does exactly what we need
+#  and very little else, which is the right shape for something that sits in
+#  the path of all traffic.
+#
+#  IMPORTANT: it does NOT decrypt anything. When a program wants an encrypted
+#  connection through a proxy it must first ask, in plain text:
+#
+#      CONNECT api.anthropic.com:443 HTTP/1.1
+#
+#  tinyproxy reads the hostname from that line, checks it against the
+#  allowlist, and then either refuses or opens a blind tunnel. It never sees
+#  inside the conversation, and it needs no certificates.
+#
+#  --no-cache tells apk not to keep its package index, which would otherwise
+#  sit in the image doing nothing.
+#
+#  Nothing else is installed. In particular there is no nginx here, even though
+#  safer-opencode needs one for its Ollama forwarder — that has its own image,
+#  Dockerfile.forwarder, next to this file. A container that stands in the path
+#  should not carry software it never runs.
+RUN apk add --no-cache tinyproxy
+
+
+# -----------------------------------------------------------------------------
+#  A non-root user to run as
+# -----------------------------------------------------------------------------
+#  tinyproxy listens on port 8888. Ports above 1024 do not need root, so there
+#  is no reason for this process to be root.
+#
+#  Normally tinyproxy starts as root and drops privileges itself. That needs a
+#  Linux capability we remove (--cap-drop ALL), so instead we start as a
+#  non-root user from the beginning and leave the User/Group directives out of
+#  the config file.
+#
+#  65532 is a conventional "nonroot" id. Any unused id would do.
+RUN addgroup -g 65532 -S proxyuser \
+ && adduser  -u 65532 -S -G proxyuser proxyuser
+
+
+# -----------------------------------------------------------------------------
+#  Where the config will appear
+# -----------------------------------------------------------------------------
+#  The launching command mounts two files here at run time:
+#      /etc/tinyproxy/tinyproxy.conf   the settings
+#      /etc/tinyproxy/allowlist.txt    the permitted hosts
+#
+#  Both are mounted read-only, so nothing inside this container can change the
+#  rules it is enforcing.
+RUN mkdir -p /etc/tinyproxy
+
+
+# -----------------------------------------------------------------------------
+#  Run as the non-root user from here on
+# -----------------------------------------------------------------------------
+USER 65532:65532
+
+
+# -----------------------------------------------------------------------------
+#  Start tinyproxy
+# -----------------------------------------------------------------------------
+#  -d  "don't daemonize" — stay in the foreground.
+#
+#      This matters. Docker considers a container alive only as long as its
+#      main process runs. A proxy that forks into the background would exit
+#      immediately and take the container with it.
+#
+#      Staying in the foreground also means tinyproxy's log goes to the
+#      container's standard output, where Docker captures it. That is how the
+#      command collects the list of blocked connections at the end of a run:
+#      `docker logs <container>`.
+#
+#  -c  which config file to read.
+CMD ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]

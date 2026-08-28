@@ -1,0 +1,190 @@
+# =============================================================================
+#  Dockerfile.claude — the image Claude Code runs inside
+# =============================================================================
+#
+#  HOW THIS IMAGE IS BUILT
+#  The safer-claude command builds it for you, pinning the version to whatever
+#  is installed on your Mac:
+#
+#      cd docker
+#      docker build --build-arg TOOL_VERSION=2.1.30 \
+#                   -f Dockerfile.claude -t safer-agent-claude .
+#
+#  -t safer-agent-claude   names the finished image
+#  .                      the build context: this folder, and only this folder.
+#                         Nothing here is COPYed, so the context exists only to
+#                         be small. Keep it that way
+#
+#  WHY THERE ARE THREE OF THESE FILES
+#  One per tool, all in this docker/ folder: Dockerfile.claude,
+#  Dockerfile.codex, Dockerfile.opencode. They
+#  are nearly identical, differing only in the npm package installed at the end.
+#  A single file with an "if" in it would be shorter, but this way each image is
+#  described by a file you can read start to finish without deciding which
+#  branch applies to you.
+#
+#  WHAT IS DELIBERATELY MISSING
+#  - git      — version control happens on the host, by hand. See below.
+#  - composer — not installed. The agent edits code; it does not manage
+#               dependencies.
+#  - database drivers — no pdo_mysql, no mysqli. The agent cannot reach a
+#               database even if one were reachable on the network.
+#
+#  The agent can run `php -l` to check syntax, and any test runner that is
+#  already vendored in the mounted project (for example vendor/bin/phpunit).
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  Base image
+# -----------------------------------------------------------------------------
+#  Start from Debian "bookworm" with PHP 8.3 command-line already installed.
+#  "cli" means no web server — we only need the `php` binary.
+FROM php:8.3-cli-bookworm
+
+
+# -----------------------------------------------------------------------------
+#  Build argument
+# -----------------------------------------------------------------------------
+#  ARG declares a variable supplied at BUILD time with --build-arg. It is not
+#  available at run time (that would be ENV).
+#
+#  TOOL_VERSION  which version of Claude Code to install, so the container
+#                matches the one on your Mac.
+ARG TOOL_VERSION
+
+
+# -----------------------------------------------------------------------------
+#  System packages, and removing git
+# -----------------------------------------------------------------------------
+#  No git on purpose. The agent reads and edits code; version control stays on
+#  the host. This matters for security, not tidiness: a .git directory holds
+#  hooks and config that execute commands on the HOST later, so an agent that
+#  can write into .git can run code on your Mac after the container is gone.
+#
+#  The php:*-cli images are built on buildpack-deps, which ships git, so it has
+#  to be purged explicitly. The safer-claude command does the other half of the
+#  job: it hides every .git directory in every mounted folder.
+#
+#  RUN executes a command while building. Everything is chained with `&&` into
+#  ONE RUN so it becomes one layer — and so that the `apt-get purge` runs in
+#  the same layer that installed things. A purge in a *later* layer would not
+#  shrink the image, because the earlier layer still contains the files.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      curl \
+      ripgrep \
+      bubblewrap \
+      libxml2-dev \
+      libonig-dev \
+ && docker-php-ext-install \
+      mbstring \
+      xml \
+ && apt-get purge -y --auto-remove git git-man \
+ && rm -rf /var/lib/apt/lists/*
+#
+#  A note on the packages above:
+#    ca-certificates  the list of trusted certificate authorities. Without it,
+#                     every HTTPS connection fails to verify.
+#    curl             a command-line HTTP client. It honours the proxy
+#                     environment variables safer-claude sets, so the agent can
+#                     fetch pages through the allowlist.
+#    ripgrep          fast recursive search. The agent uses it constantly.
+#    bubblewrap       a sandboxing helper some agents try to use internally.
+#                     It cannot actually work under our security flags (no
+#                     capabilities, no privilege escalation) — kept only so the
+#                     agent does not error on a missing binary.
+#    libxml2-dev,
+#    libonig-dev      C libraries needed to COMPILE the two PHP extensions on
+#                     the next line. Not needed at run time, but removing them
+#                     would need a multi-stage build; not worth it here.
+#
+#  docker-php-ext-install compiles and enables a PHP extension. Only two:
+#    mbstring  multi-byte string functions — most PHP code assumes it exists
+#    xml       XML parsing — Drupal and PHPUnit both need it
+#
+#  Note what is NOT here: pdo_mysql, mysqli, pdo_pgsql. That is intentional.
+#  It means Drupal kernel and functional tests cannot run in this container,
+#  and it also means the container has no way to talk to a database even if the
+#  network allowed it.
+
+
+# -----------------------------------------------------------------------------
+#  Node.js — required by Claude Code itself
+# -----------------------------------------------------------------------------
+#  Claude Code is distributed as an npm package, so Node has to be present even
+#  though the code being edited is PHP.
+#
+#  The nodesource script adds Debian's package source for Node 22. It pulls git
+#  back in as a dependency of something, so purge it again here.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs \
+ && apt-get purge -y --auto-remove git git-man \
+ && rm -rf /var/lib/apt/lists/*
+
+
+# -----------------------------------------------------------------------------
+#  Assertion: fail the build if git came back
+# -----------------------------------------------------------------------------
+#  Purging git twice above is not a guarantee — a future package could pull it
+#  in as a dependency without anyone noticing. This line turns that silent
+#  regression into a loud build failure.
+#
+#  `!` inverts the exit status, so this succeeds only when `command -v git`
+#  FAILS, meaning git is genuinely absent. The second test catches the case
+#  where the binary is gone but git's helper programs remain.
+#
+#  If the build stops here, git returned as a dependency. Find out what pulled
+#  it in rather than deleting this check.
+RUN ! command -v git >/dev/null 2>&1 \
+ && [ ! -d /usr/lib/git-core ]
+
+
+# -----------------------------------------------------------------------------
+#  A git shim that explains itself
+# -----------------------------------------------------------------------------
+#  Without this, the agent runs `git status`, sees "command not found", and
+#  reasonably concludes it should install git. It will then waste turns trying.
+#  A tiny script that explains the absence saves that loop.
+#
+#  chmod 0555 = readable and executable by everyone, writable by NOBODY. The
+#  agent runs as a non-root user and the container filesystem is read-only at
+#  run time, so this cannot be replaced from inside.
+#
+#  exit 127 is the conventional "command not found" status, so scripts that
+#  check for git behave as if it is missing.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'echo "git is not available in this sandbox." >&2' \
+      'echo "Version control is handled on the host, outside the container." >&2' \
+      'exit 127' \
+    > /usr/local/bin/git \
+ && chmod 0555 /usr/local/bin/git
+
+
+# -----------------------------------------------------------------------------
+#  Install Claude Code
+# -----------------------------------------------------------------------------
+#  This is the last real step on purpose: it is the layer that changes most
+#  often (every time a new version is released), so everything above it stays
+#  cached.
+#
+#  npm install -g puts the executable on PATH for every user.
+#  ${TOOL_VERSION} pins the exact version so the container matches your host.
+RUN npm install -g @anthropic-ai/claude-code@${TOOL_VERSION}
+
+
+# -----------------------------------------------------------------------------
+#  Default command
+# -----------------------------------------------------------------------------
+#  What runs if `docker run` is given no command. safer-claude always passes one
+#  explicitly, so this is only a fallback for poking at the image by hand:
+#  `docker run --rm -it safer-agent-claude`
+#
+#  Note there is no USER instruction here. safer-claude passes --user with YOUR
+#  user id at run time instead, so files the agent creates in a mounted folder
+#  belong to you and not to root.
+CMD ["bash"]

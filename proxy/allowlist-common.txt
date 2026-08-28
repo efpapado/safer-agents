@@ -1,0 +1,86 @@
+# =============================================================================
+#  allowlist-common.txt — destinations permitted for ALL THREE commands
+# =============================================================================
+#
+#  This is the file to edit for everyday work. Documentation, references, the
+#  sites you actually use. It applies to safer-claude, safer-codex and
+#  safer-opencode alike.
+#
+#  Each command ALSO reads its own file, which holds only that tool's own
+#  service — its model API and its login host:
+#
+#      allowlist-claude.txt
+#      allowlist-codex.txt
+#      allowlist-opencode.txt
+#
+#  The two files are joined at launch. Nothing depends on the split, but it
+#  means claude cannot reach OpenAI's servers and codex cannot reach
+#  Anthropic's, and an unexpected entry in a connection log is easier to notice.
+#
+#  Anything not matched in either file is REFUSED and written to
+#  connection_logs/. Edit and re-run; no rebuild is needed.
+#
+#  ---------------------------------------------------------------------------
+#  FORMAT
+#  ---------------------------------------------------------------------------
+#  One extended regular expression per line. Blank lines and # comments are
+#  ignored.
+#
+#  ANCHOR EVERY LINE with ^ at the start and $ at the end, and escape the dots
+#  with a backslash. Here is why that is not cosmetic:
+#
+#      api.anthropic.com      matches  evil-api-anthropic-com.attacker.net
+#                             (an unanchored dot means "any character", and an
+#                              unanchored pattern matches anywhere in the host)
+#
+#      ^api\.anthropic\.com$  matches  api.anthropic.com   and nothing else
+#
+#  ---------------------------------------------------------------------------
+#  TWO RULES IF YOU ADD ENTRIES
+#  ---------------------------------------------------------------------------
+#  1. Never allow a host that republishes what it receives.
+#     Gists, pastebins, webhook.site, ngrok tunnels: someone sends data in, a
+#     stranger reads it out. Allowing one of those hands back the exact channel
+#     this file exists to close. This is why plain github.com is a bad entry —
+#     gists come with it.
+#
+#  2. Never use a wildcard on a domain where anyone can claim a subdomain.
+#     *.github.io, *.pages.dev, *.vercel.app, *.workers.dev, *.s3.amazonaws.com
+#     — an attacker registers a subdomain in half a minute and is now on your
+#     allowlist.
+#
+#  WHY AN ALLOWLIST WORKS AT ALL, given that a request can carry data in its
+#  own URL: stealing data needs a destination the attacker can READ. A request
+#  to www.php.net carrying a stolen password lands in php.net's server logs and
+#  reaches nobody. The two rules above are what keep that true.
+#
+#  ---------------------------------------------------------------------------
+#  A DIFFERENT RISK: INJECTION
+#  ---------------------------------------------------------------------------
+#  The hosts below are safe against data theft — they do not show your requests
+#  to strangers. Some are still an INJECTION surface, which is a separate
+#  problem: drupal.org issue queues, Stack Overflow answers and GitLab snippets
+#  contain text written by anyone, that text can instruct the agent, and it can
+#  change after you have reviewed the agent's work. Pure reference material
+#  (php.net, MDN) does not have that problem. Treat the two groups differently.
+#
+#  Grow this list from evidence, not guesswork. Work for a few sessions, read
+#  connection_logs/, and add what actually came up.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  PHP and Symfony reference
+# -----------------------------------------------------------------------------
+^www\.php\.net$
+^symfony\.com$
+
+# -----------------------------------------------------------------------------
+#  Drupal
+# -----------------------------------------------------------------------------
+#  api.drupal.org is generated reference material.
+#  www.drupal.org includes the issue queues, which are user-written text — an
+#  injection surface, not an exfiltration one. Worth knowing, not necessarily
+#  worth removing.
+^api\.drupal\.org$
+^www\.drupal\.org$

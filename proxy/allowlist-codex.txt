@@ -1,0 +1,42 @@
+# =============================================================================
+#  allowlist-codex.txt — destinations for safer-codex only
+# =============================================================================
+#
+#  Read together with allowlist-common.txt, which holds the documentation hosts
+#  shared by all three commands. Put general-purpose sites there, not here.
+#  This file is for Codex's own services.
+#
+#  Anchor every line and escape the dots — see allowlist-common.txt for why
+#  that is not cosmetic, and for the two rules about which hosts are safe to
+#  add at all.
+#
+#  Source: OpenAI's permission-profile documentation. Their published list is
+#  described as examples rather than exhaustive, so treat this as a starting
+#  point and check connection_logs/ after the first few sessions.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  REQUIRED
+# -----------------------------------------------------------------------------
+
+#  The API itself: every request the agent makes to the model.
+^api\.openai\.com$
+
+#  Sign-in and token refresh. Codex signs in through ChatGPT, so both of these
+#  are part of authentication, not optional extras.
+#
+#  Expect the same trap as claude's platform.claude.com: leave these out and
+#  the session starts fine, then fails when a token needs renewing, in a way
+#  that looks like a proxy fault rather than an expired login.
+^auth\.openai\.com$
+^chatgpt\.com$
+
+
+# -----------------------------------------------------------------------------
+#  OPTIONAL
+# -----------------------------------------------------------------------------
+
+#  Account and dashboard services. Not needed for ordinary editing work.
+#  Uncomment if something in connection_logs/ says otherwise.
+#^platform\.openai\.com$

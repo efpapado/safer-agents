@@ -1,0 +1,108 @@
+# =============================================================================
+#  allowlist-opencode.txt — destinations for safer-opencode only
+# =============================================================================
+#
+#  Read together with allowlist-common.txt, which holds the documentation hosts
+#  shared by all three commands. Put general-purpose sites there, not here.
+#
+#  Anchor every line and escape the dots — see allowlist-common.txt for why
+#  that is not cosmetic, and for the two rules about which hosts are safe to
+#  add at all.
+#
+#  opencode is provider-agnostic: which model host it needs depends on the
+#  provider configured in ~/.config/opencode/opencode.json. That is why this
+#  file starts almost empty — a guessed list would be wrong in both directions.
+#  Run a session, read connection_logs/, add what actually came up.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  OPENCODE'S OWN SERVICES
+# -----------------------------------------------------------------------------
+
+#  Config and TUI schema validation, sign-in, update checks. opencode may want
+#  this at startup even when every model is local.
+#
+#  Set "autoupdate": false in opencode.json to reduce what it is used for. Then
+#  see whether the connection log still shows it before allowing it.
+#^opencode\.ai$
+
+#  The catalogue opencode reads provider and model metadata from.
+#
+#  OBSERVED 2026-08-25. A run refused this once and opencode then died with
+#  "Unexpected server error", so it is needed at startup even when every model
+#  is local. Note the host is NOT models.dev, which is what this file guessed
+#  before anyone had run it. The guess was wrong, which is the argument for
+#  keeping this file evidence-led.
+^models\.opencode\.ai$
+
+#  models.dev is the catalogue project's own domain. Not seen in any log, so it
+#  stays off. Add it only if a log shows it.
+#^models\.dev$
+
+
+# -----------------------------------------------------------------------------
+#  OLLAMA
+# -----------------------------------------------------------------------------
+#  LOCAL models need NOTHING here. They do not go through the gatekeeper at all
+#  — run with --ollama and a separate forwarder container relays one port to
+#  your Mac. See start_ollama_forwarder() in the safer-opencode command.
+#
+#  Do NOT add `ollama` to this file. It is not an internet host, it is the name
+#  of that forwarder container on the sealed network. The agent reaches it
+#  directly, because safer-opencode adds `ollama` to NO_PROXY. Adding it here
+#  would do nothing useful and would make this file mean two different things.
+#
+#  CLOUD models depend on how they are configured, and the difference matters:
+#
+#    Through the local daemon (models named like `gpt-oss:120b-cloud`, run via
+#    your Mac's Ollama) — nothing here either, and that is a WARNING, not a
+#    convenience. Your Mac makes the internet connection, so this file does not
+#    govern it and connection_logs/ does not record it. Your prompt, including
+#    whatever project code is in it, goes to ollama.com along a path none of the
+#    protection in this folder can see. An empty log does not mean nothing left.
+#
+#    The forwarder refuses model downloads, so the agent cannot install such a
+#    model itself. What is reachable is what `ollama list` already shows.
+#    safer-opencode prints any cloud models it finds when it starts.
+#
+#    Configured directly, with an ollama.com base URL and an API key in
+#    opencode.json — then the container connects out itself, that traffic DOES
+#    pass the gatekeeper, and this entry is required. Uncomment it.
+#^ollama\.com$
+
+
+# -----------------------------------------------------------------------------
+#  THE NPM REGISTRY — deliberately still refused
+# -----------------------------------------------------------------------------
+#  OBSERVED 2026-08-25, once, in the same run as models.opencode.ai. opencode
+#  fetches provider SDK packages at run time rather than bundling them all.
+#
+#  This one is NOT uncommented, and the reason is worth more than the
+#  convenience. A package registry is a general-purpose code source: allowing it
+#  gives the agent a route to fetch and run whatever it likes, and a plain GET
+#  can carry stolen text inside the URL, where the gatekeeper cannot see it. It
+#  is a wider hole than any model API on this list.
+#
+#  It also contradicts a stated rule for these containers: the agent edits code
+#  and does not manage dependencies. There is no npm here for the agent's sake.
+#  If it is genuinely needed, it is needed by opencode itself.
+#
+#  So: try models.opencode.ai ALONE first. That single refusal is enough to
+#  explain the crash, and this one may have been an optional check that opencode
+#  survives without. Only if a run still fails should this be reconsidered — and
+#  the better answer then is to pre-install the provider package into
+#  docker/Dockerfile.opencode, so the running container needs no registry at
+#  all.
+#^registry\.npmjs\.org$
+
+
+# -----------------------------------------------------------------------------
+#  OTHER PROVIDERS
+# -----------------------------------------------------------------------------
+#  If you point opencode at a hosted provider, its API host goes here. A few
+#  common ones, all commented — uncomment only what you actually configure.
+#^api\.anthropic\.com$
+#^api\.openai\.com$
+#^openrouter\.ai$
+#^api\.groq\.com$

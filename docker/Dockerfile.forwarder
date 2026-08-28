@@ -1,0 +1,102 @@
+# =============================================================================
+#  Dockerfile.forwarder — the Ollama forwarder image  (safer-opencode only)
+# =============================================================================
+#
+#  WHAT THIS IS FOR
+#  Only safer-opencode --ollama uses this. It is the one way the agent can
+#  reach a model server running on your Mac.
+#
+#      ┌─ sealed network ──────────────────┐
+#      │  ┌───────┐      ┌───────────────┐ │      ┌──────────────────┐
+#      │  │ agent │ ───► │ this container│ │ ───► │ your Mac's       │
+#      │  └───────┘      └───────────────┘ │      │ Ollama, port     │
+#      │                 known as "ollama" │      │ 11434, only      │
+#      └───────────────────────────────────┘      └──────────────────┘
+#
+#  WHY IT IS A SEPARATE IMAGE FROM THE GATEKEEPER
+#  The gatekeeper (Dockerfile.proxy, next to this file) runs tinyproxy and
+#  filters by HOSTNAME.
+#  This one runs nginx and filters by request PATH. Neither needs the other's
+#  software, and safer-claude and safer-codex never build this image at all.
+#
+#  WHY NGINX AND NOT A SIMPLE RELAY
+#  The first version of this used socat, which copies bytes from one socket to
+#  another and understands nothing about what it is copying. That was a mistake.
+#
+#  Ollama's HTTP interface is not only "ask the model a question". It is also
+#  the unauthenticated control panel for the daemon. One of its requests,
+#  /api/pull, downloads a model — and a model name may name its own registry
+#  host, so that single request makes your Mac connect to any address the
+#  caller chooses. A relay hands that out. nginx can read the request path, so
+#  it can forward inference and refuse everything else.
+#
+#  The rules live in proxy/ollama.conf, which explains each one. They are
+#  mounted at run time, not baked in, so you can adjust them without rebuilding.
+#
+#  BUILD
+#  safer-opencode builds it for you, the first time you use --ollama:
+#      cd docker && docker build -f Dockerfile.forwarder -t safer-forwarder .
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  Base image
+# -----------------------------------------------------------------------------
+#  Alpine Linux, chosen because it is tiny (about 8 MB) and because it is an
+#  official image. Pulling a ready-made third-party proxy image from Docker Hub
+#  would mean trusting a name we do not control.
+FROM alpine:3.20
+
+
+# -----------------------------------------------------------------------------
+#  Install nginx
+# -----------------------------------------------------------------------------
+#  --no-cache tells apk not to keep its package index, which would otherwise
+#  sit in the image doing nothing.
+RUN apk add --no-cache nginx
+
+
+# -----------------------------------------------------------------------------
+#  A non-root user to run as
+# -----------------------------------------------------------------------------
+#  nginx listens on port 11434 here. Ports above 1024 do not need root, so
+#  there is no reason for this process to be root.
+#
+#  Normally nginx starts as root and drops privileges itself. That needs a Linux
+#  capability we remove (--cap-drop ALL), so instead we start as a non-root user
+#  from the beginning and leave the `user` directive out of the config file.
+#
+#  65532 is a conventional "nonroot" id. Any unused id would do.
+RUN addgroup -g 65532 -S proxyuser \
+ && adduser  -u 65532 -S -G proxyuser proxyuser
+
+
+# -----------------------------------------------------------------------------
+#  Where the rules will appear
+# -----------------------------------------------------------------------------
+#  safer-opencode mounts one file here at run time:
+#      /etc/nginx/ollama.conf
+#
+#  It is mounted read-only, so nothing inside this container can change the
+#  rules it is enforcing.
+RUN mkdir -p /etc/nginx
+
+
+# -----------------------------------------------------------------------------
+#  Run as the non-root user from here on
+# -----------------------------------------------------------------------------
+USER 65532:65532
+
+
+# -----------------------------------------------------------------------------
+#  Default command
+# -----------------------------------------------------------------------------
+#  safer-opencode passes this explicitly, so the line below is only a fallback
+#  for starting the image by hand.
+#
+#  The config file itself contains `daemon off;`, which keeps nginx in the
+#  foreground. That matters: Docker considers a container alive only as long as
+#  its main process runs, and it also means nginx's log goes to the container's
+#  output where `docker logs` can collect it. That is how refused requests reach
+#  connection_logs/.
+CMD ["nginx", "-c", "/etc/nginx/ollama.conf"]

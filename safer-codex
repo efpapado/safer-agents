@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  safer-codex — run Codex in a locked-down container
+# =============================================================================
+#
+#  USAGE
+#      safer-codex
+#      safer-codex --ro ../../../core --ro ../../../../vendor
+#      safer-codex --rw ../../contrib
+#      safer-codex --allow www.php.net
+#      safer-codex --offline
+#      safer-codex -- bash
+#
+#  FLAGS
+#      --add PATH      mount a host folder READ-ONLY, in addition to the
+#                      current directory. --ro means the same thing
+#      --rw PATH       mount a host folder read-WRITE. The agent can change
+#                      your Mac through it, so a folder outside the current
+#                      directory has to be confirmed
+#      --allow HOST    permit one extra network destination for this run only
+#      --offline       no network at all (the agent cannot reach the model API,
+#                      so this is only useful with `-- bash` for local analysis)
+#      -- COMMAND      run COMMAND instead of codex
+#
+#  There is no --effort here: that is a Claude Code setting. There is no
+#  --ollama either: that belongs to safer-opencode.
+#
+#  WHERE THE REST OF THE LOGIC IS
+#  The sandbox itself — the sealed network, the gatekeeper, hiding .git, the
+#  connection log — is in lib/safer-common.sh, shared with safer-claude and
+#  safer-opencode. This file holds only what is specific to Codex.
+#
+#  ---------------------------------------------------------------------------
+#  SETTINGS INSIDE THE SANDBOX
+#  ---------------------------------------------------------------------------
+#  Settings changed in the sandbox apply for the session and are then thrown
+#  away. Your Mac's ~/.codex is never modified. See the config strategy essay
+#  in lib/safer-common.sh.
+#
+#  ---------------------------------------------------------------------------
+#  SESSION HISTORY DOES NOT PERSIST — and why
+#  ---------------------------------------------------------------------------
+#  `codex resume` will not see sessions from earlier container runs.
+#
+#  This is a deliberate trade, not an oversight. Codex names its sessions by
+#  date, not by project, and keeps prompt history in one shared file. Binding
+#  that store back into the container would expose the prompts and file
+#  contents of EVERY project you have ever worked on to a sandbox that is meant
+#  to see one. It is all or nothing, and none is the safer default.
+#
+#  Claude Code does not have this problem, because it stores transcripts per
+#  project, so safer-claude can bind back just the one.
+#
+#  If you want the history back and accept what it exposes, there is a one-line
+#  change marked in build_config() below.
+# =============================================================================
+
+set -euo pipefail
+
+
+# ---------------------------------------------------------------------------
+#  Find the folder this command lives in, and load the shared machinery.
+#
+#  BASH_SOURCE[0] is the path to this file. `dirname` strips the filename.
+#  `cd ... && pwd -P` turns it into a full path with all symlinks resolved.
+# ---------------------------------------------------------------------------
+SAFER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+TOOL="codex"
+
+# shellcheck source=lib/safer-common.sh
+source "$SAFER_ROOT/lib/safer-common.sh"
+
+
+usage() {
+    echo "Usage: safer-codex [--add PATH] [--rw PATH] [--allow HOST]"
+    echo "                   [--offline] [-- COMMAND ...]"
+    echo ""
+    echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
+    echo "  --rw PATH       mount a folder read-WRITE. The agent can change"
+    echo "                  your Mac through it, so ask for it by name. A"
+    echo "                  folder outside your project must be confirmed."
+    echo "  --allow HOST    allow one extra destination for this run only"
+    echo "  --offline       no network at all"
+    echo ""
+    echo "The folder you run in is always read-write. Inside every mounted"
+    echo "folder, .git and the paths in dangerous-paths.txt are covered so"
+    echo "the agent cannot write them. That list cannot be complete, so at"
+    echo "exit the run reports every auto-run file that appeared during the"
+    echo "session. Read it before you commit."
+}
+
+
+# =============================================================================
+#  What is specific to Codex
+# =============================================================================
+
+# The image name is deliberately NOT "agent-codex". That is what the older
+# safe-agent launcher builds, from a different Dockerfile. Sharing the name
+# would let these commands silently reuse an image built by that older recipe —
+# one that may still contain git. A separate name keeps the two independent.
+IMAGE="safer-agent-codex"
+DOCKERFILE="$DOCKER_DIR/Dockerfile.codex"
+
+VERSION_COMMAND=(codex --version)
+DEFAULT_COMMAND=(codex)
+
+CFG_HOST="$HOME/.codex"                  # on your Mac
+CFG_CONT="/home/agent/.codex"            # inside the container
+
+# The config folder is NOT mounted directly. See build_config() below.
+PROTECTED_ROOTS+=("$CFG_HOST")
+
+# Nothing to switch off by environment variable.
+#
+# Codex has no documented setting for turning off its update check or its
+# telemetry. Rather than invent variable names that do nothing, this is left
+# empty: whatever Codex tries to reach will be refused by the gatekeeper and
+# will appear in connection_logs/, where you can decide about it with evidence
+# instead of guesswork.
+TOOL_ENV=()
+
+
+# ---------------------------------------------------------------------------
+#  Build the container's ~/.codex as a throwaway copy.
+#
+#  Read the config strategy essay in lib/safer-common.sh first — it explains
+#  why this is a copy rather than a mount, and why that removes the hook risk
+#  instead of merely containing it.
+# ---------------------------------------------------------------------------
+build_config() {
+    config_root "$CFG_HOST" "$CFG_CONT" codex
+
+    # config.toml holds mcp_servers and notify, both of which start processes
+    # on your Mac. As a copy it is safe to let the tool rewrite it, which also
+    # means settings can be saved in-session.
+    copy_in config.toml empty
+
+    # Access and refresh tokens, in plaintext. Read-only: the agent must be
+    # able to READ them to authenticate, and what makes a read harmless is the
+    # network, which gives a stolen token nowhere to go.
+    ro_back auth.json
+
+    # hooks.json runs commands on your Mac. Read-only so your own hooks work
+    # and the agent cannot add any.
+    #
+    # Worth noting: this file was MISSED by the older version of these scripts,
+    # which listed the dangerous files one by one. That is the failure mode the
+    # copy strategy removes — a file nobody thought of is now safe by default
+    # rather than exposed by default.
+    ro_back hooks.json AGENTS.md prompts themes model-catalogs
+
+    # NOT bound back, so they are per-session and discarded:
+    #   history.jsonl   prompt history from every project
+    #   sessions/       the session store, and the SQLite state database
+    #   log/
+    #
+    # To trade this back — accepting that the sandbox then sees every project's
+    # prompts and file excerpts — add this one line:
+    #     rw_back sessions
+    echo "Config: throwaway copy — settings and session history do not persist."
+}
+
+
+# =============================================================================
+#  Read the command line
+#
+#  Codex adds no flags of its own, so every argument goes to the shared parser.
+#  See section 11 of lib/safer-common.sh.
+# =============================================================================
+
+while [[ $# -gt 0 ]]; do             # $# = how many arguments are left
+    parse_common_arg "$@"
+    shift "$ARGS_CONSUMED"
+done
+
+safer_resolve_command
+
+
+# =============================================================================
+#  Assemble and run
+# =============================================================================
+
+safer_check_workdir          # sets HOST_PATH
+safer_ensure_agent_image
+
+build_config
+apply_config_copies          # nothing registered for codex; harmless
+
+safer_protect_paths
+safer_setup_network
+safer_run
