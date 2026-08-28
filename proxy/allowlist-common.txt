@@ -84,3 +84,110 @@
 #  worth removing.
 ^api\.drupal\.org$
 ^www\.drupal\.org$
+
+# -----------------------------------------------------------------------------
+#  ANTHROPIC DOCUMENTATION
+# -----------------------------------------------------------------------------
+#  VERIFIED 2026-08-28 with curl. The docs moved. Both old hosts now answer
+#  with a 301 to platform.claude.com/docs:
+#
+#      docs.anthropic.com  ->  platform.claude.com/docs/
+#      docs.claude.com     ->  platform.claude.com/docs
+#
+#  A redirect is a SECOND request. The agent must reach the first host to see
+#  the redirect, and the second host to read the page. So keep all three.
+#  Old links in code comments and old answers still point at the first two.
+^docs\.anthropic\.com$
+^docs\.claude\.com$
+
+#  The docs themselves. This host is also Claude Code's token-refresh host, so
+#  allowlist-claude.txt lists it as REQUIRED. It is repeated here on purpose:
+#  a repeated line costs nothing, and without it safer-codex and
+#  safer-opencode cannot read the Anthropic documentation at all.
+#
+#  KNOW WHAT THIS COSTS. The split between these files means "claude cannot
+#  reach OpenAI, codex cannot reach Anthropic". This line, and the OpenAI
+#  block below, weaken that. The hosts are documentation, not model APIs, so
+#  the agent still cannot send your code to the other vendor's model. But an
+#  entry for this host in a codex connection log is no longer a surprise.
+#  Remove this line if you prefer the stricter split.
+^platform\.claude\.com$
+
+#  Product pages, the engineering blog, model cards, the news posts that
+#  announce a model. www.anthropic.com serves them; anthropic.com redirects
+#  to it, so keep both.
+^anthropic\.com$
+^www\.anthropic\.com$
+
+#  Claude Code's own documentation and the Agent SDK pages.
+^claude\.com$
+^code\.claude\.com$
+
+#  Service health. Useful when a request fails and you need to know whether
+#  the fault is yours. status.anthropic.com redirects to status.claude.com.
+^status\.anthropic\.com$
+^status\.claude\.com$
+
+
+# -----------------------------------------------------------------------------
+#  OPENAI DOCUMENTATION
+# -----------------------------------------------------------------------------
+#  VERIFIED 2026-08-28 with curl.
+#
+#  developers.openai.com is the current documentation site and answers 200.
+#  platform.openai.com, openai.com and help.openai.com answered 403 to plain
+#  curl. That is the edge network refusing an unusual client, not a dead host.
+#  The agent sends a browser-like request, so expect them to work. Read
+#  connection_logs/ if a page will not load.
+^developers\.openai\.com$
+
+#  The API reference and the model pages still live here. Many deep links in
+#  existing code and answers point at platform.openai.com/docs/...
+^platform\.openai\.com$
+
+#  The Cookbook. cookbook.openai.com now answers 308 to
+#  developers.openai.com/cookbook, so keep both for old links.
+^cookbook\.openai\.com$
+
+#  Announcements, model release notes, pricing, the research posts.
+^openai\.com$
+^www\.openai\.com$
+
+#  The Model Spec, which is published on its own host.
+^model-spec\.openai\.com$
+
+#  Help centre articles and the free courses. Add them only if you want them;
+#  neither is needed for API work.
+^help\.openai\.com$
+#^academy\.openai\.com$
+
+#  Service health.
+^status\.openai\.com$
+
+
+# -----------------------------------------------------------------------------
+#  SDK PACKAGES — decide this one deliberately
+# -----------------------------------------------------------------------------
+#  Both vendors ship SDKs from the public registries. Allow these only if you
+#  want the agent to INSTALL packages, which is a larger decision than reading
+#  documentation. An install runs code from the registry inside the container.
+#^registry\.npmjs\.org$
+#^pypi\.org$
+#^files\.pythonhosted\.org$
+
+
+# -----------------------------------------------------------------------------
+#  GITHUB — deliberately still refused
+# -----------------------------------------------------------------------------
+#  The SDK source, the cookbook notebooks and most examples are on GitHub. It
+#  is still not here, and the reason is rule 1 at the top of this file.
+#
+#  The gatekeeper filters on the HOSTNAME only. tinyproxy cannot allow
+#  github.com/openai/openai-python and refuse github.com/gists — the host is
+#  the same. Allowing github.com allows gists, and a gist is a page an
+#  attacker creates, the agent writes your secret into, and the attacker
+#  reads. The same is true of raw.githubusercontent.com and of every
+#  *.github.io subdomain.
+#
+#  Use the vendor sites above for reference. Clone repositories yourself, on
+#  the host, into the project folder the agent already has.
