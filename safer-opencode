@@ -246,8 +246,8 @@ build_config() {
 #  The agent reaches it by container name: http://ollama:11434
 #
 #  WHY IT IS A FILTER AND NOT A PIPE
-#  The first version of this used socat, a relay that copies bytes and reads
-#  nothing. That was wrong. Ollama's HTTP interface is also its control panel,
+#  Do not replace this with socat, or with any relay that copies bytes and
+#  reads nothing. Ollama's HTTP interface is also its control panel,
 #  with no password on it, and one of its requests — /api/pull — makes your Mac
 #  connect to any registry host the caller names. A pipe hands that out: the
 #  agent could reach any address it likes, with text of its choosing in the
@@ -430,8 +430,7 @@ warn_about_cloud_models() {
 #      Error: Unexpected server error. Check server logs for details.
 #
 #  with no blocked host in the connection log, because loopback never reaches
-#  the gatekeeper. This function used to return 0 either way, and the caller
-#  printed "repointed the config copy" regardless of whether it had.
+#  the gatekeeper.
 rewrite_ollama_host() {
     local f="$1"
 

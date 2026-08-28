@@ -35,21 +35,20 @@
 #  /effort, /model and the rest work normally. Changes apply for the session and
 #  are then thrown away — your Mac's settings are never modified.
 #
-#  This used to fail with:
+#  DO NOT MOUNT settings.json AS A SINGLE FILE. Claude Code saves a setting by
+#  writing a temporary file and renaming it over the real one. A single-file
+#  bind mount IS a mount point, and Linux refuses to let a rename replace a
+#  mount point. The save then fails with:
 #
 #      EBUSY: resource busy or locked, rename
 #      '/home/agent/.claude/settings.json.tmp...' -> '.../settings.json'
 #
-#  The cause was not permissions. Claude Code saves settings by writing a
-#  temporary file and renaming it over the real one, and settings.json used to
-#  be mounted as a single file — which makes it a "mount point", and Linux
-#  refuses to let a rename replace a mount point. It would have failed even if
-#  the mount had been writable.
+#  The read-only flag is not the cause. The same fault occurs on a writable
+#  single-file mount.
 #
-#  It is now a real file inside a throwaway copy of ~/.claude, so the rename
-#  works. See build_config() below, and the config strategy essay in
-#  lib/safer-common.sh for why this is also better security than what it
-#  replaced.
+#  So settings.json is a real file inside a throwaway copy of ~/.claude, and
+#  the rename works. See build_config() below, and the config strategy essay in
+#  lib/safer-common.sh for why the copy is also the stronger security choice.
 #
 #  Note: --effort sets an environment variable that OVERRIDES /effort for the
 #  whole session. Use it for unattended runs; leave it off if you want to change
@@ -215,17 +214,17 @@ build_config() {
 
     # Authentication. The token is a real writable FILE in the throwaway copy,
     # so Claude Code can save its hourly renewal, and /login works inside the
-    # sandbox. It used to be a read-only single-file bind mount, which failed
-    # twice over: the readonly flag blocked the write, and a rename cannot
+    # sandbox. Do not make it a read-only single-file bind mount. That fails
+    # twice over: the readonly flag blocks the write, and a rename cannot
     # replace a mount point — the same EBUSY fault described for settings.json
-    # at the top of this file. A session therefore died after about an hour, and
-    # the token could never be renewed.
+    # at the top of this file. The session then dies after about an hour,
+    # because the token can never be renewed.
     #
-    # Read-only was never the thing protecting your Mac; the copy is. Neither
-    # your Keychain nor your file is reachable from the container, so whatever
-    # the agent writes here dies with the session. Reading the token stays
-    # possible, exactly as before — what makes a read harmless is the network,
-    # which gives a stolen token nowhere to go.
+    # Read-only is not the thing protecting your Mac; the copy is. Neither your
+    # Keychain nor your file is reachable from the container, so whatever the
+    # agent writes here dies with the session. Reading the token stays possible,
+    # and what makes a read harmless is the network, which gives a stolen token
+    # nowhere to go.
     seed_credentials
 
     # Your own commands, subagents, skills and instructions, so the sandbox

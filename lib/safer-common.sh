@@ -187,11 +187,11 @@ DANGEROUS_PATHS="$SAFER_ROOT/dangerous-paths.txt"
 #  relative to this, so moving the folder again is one edit.
 #
 #  THIS IS ALSO THE BUILD CONTEXT, and that is deliberate. The context is the
-#  set of files Docker sends to its daemon before a build starts. It used to be
-#  $SAFER_ROOT, which meant every build shipped the launcher, the library, the
-#  allowlists and connection_logs/ to the daemon in order to build an image
-#  that reads none of them. None of these Dockerfiles has a COPY or an ADD, so
-#  the context can be the folder holding them and nothing is lost.
+#  set of files Docker sends to its daemon before a build starts. Keep it at
+#  this folder and not at $SAFER_ROOT: a wider context ships the launcher, the
+#  library, the allowlists and connection_logs/ to the daemon in order to build
+#  an image that reads none of them. None of these Dockerfiles has a COPY or an
+#  ADD, so the context can be the folder holding them and nothing is lost.
 #
 #  If a Dockerfile ever gains a COPY, the file it copies must be inside this
 #  folder. That is a feature: it keeps the answer to "what can a build read"
@@ -1450,7 +1450,7 @@ add_mount() {
 #
 #  All three tools keep their settings in a folder in your home directory. The
 #  obvious approach is to mount that folder read-write and pin the dangerous
-#  files read-only on top. That is what these scripts used to do, and it has two
+#  files read-only on top. That approach is not used here, because it has two
 #  problems.
 #
 #  1. It breaks saving settings, and NOT because of the read-only flag.
@@ -1462,8 +1462,8 @@ add_mount() {
 #
 #  2. It is a blocklist. It protects the paths someone thought of. Every new
 #     config file a tool learns to read is unprotected until these scripts are
-#     updated to match. Codex's hooks.json, which runs commands on your Mac,
-#     was missed for exactly this reason.
+#     updated to match. Codex's hooks.json, which runs commands on your Mac, is
+#     the kind of path such a list misses.
 #
 #  So the strategy is inverted: the container gets a THROWAWAY COPY of the
 #  config folder, and only what genuinely has to be shared is bound back.
@@ -2405,10 +2405,10 @@ safer_check_workdir() {
 #    1. The tool was updated on your Mac, so the container's copy is older.
 #    2. The Dockerfile was edited, so the image no longer matches the recipe.
 #
-#  Only the first used to be checked. That was a real trap: adding a security
-#  measure to a Dockerfile — purging git, say — appeared to do nothing at all
-#  until the tool happened to release a new version. So the Dockerfile's
-#  checksum is now recorded in the image as a label and compared too.
+#  A version check alone catches only the first, and the gap is a trap: a
+#  security measure added to a Dockerfile — purging git, say — would do nothing
+#  at all until the tool happened to release a new version. So the Dockerfile's
+#  checksum is recorded in the image as a label and compared too.
 # =============================================================================
 
 # ---------------------------------------------------------------------------

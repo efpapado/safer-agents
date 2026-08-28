@@ -88,8 +88,8 @@
 # -----------------------------------------------------------------------------
 #  ANTHROPIC DOCUMENTATION
 # -----------------------------------------------------------------------------
-#  VERIFIED 2026-08-28 with curl. The docs moved. Both old hosts now answer
-#  with a 301 to platform.claude.com/docs:
+#  The documentation moved. Both older hosts answer with a 301 to
+#  platform.claude.com/docs:
 #
 #      docs.anthropic.com  ->  platform.claude.com/docs/
 #      docs.claude.com     ->  platform.claude.com/docs
@@ -132,10 +132,9 @@
 # -----------------------------------------------------------------------------
 #  OPENAI DOCUMENTATION
 # -----------------------------------------------------------------------------
-#  VERIFIED 2026-08-28 with curl.
+#  developers.openai.com is the current documentation site.
 #
-#  developers.openai.com is the current documentation site and answers 200.
-#  platform.openai.com, openai.com and help.openai.com answered 403 to plain
+#  platform.openai.com, openai.com and help.openai.com answer 403 to a plain
 #  curl. That is the edge network refusing an unusual client, not a dead host.
 #  The agent sends a browser-like request, so expect them to work. Read
 #  connection_logs/ if a page will not load.

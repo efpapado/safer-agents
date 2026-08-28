@@ -43,9 +43,3 @@
 #  Only needed if a login is ever attempted INSIDE the container. You log in on
 #  the host, so normally this stays off.
 ^claude\.ai$
-
-#  NOTE: a line reading `developers.openai.com/` used to sit at the end of
-#  this file. It never did anything. The gatekeeper matches the HOSTNAME, so a
-#  trailing slash can never match, and the line was not anchored either. The
-#  OpenAI documentation hosts are now in allowlist-common.txt, correctly
-#  written, and are available to all three commands.

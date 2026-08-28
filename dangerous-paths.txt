@@ -152,7 +152,7 @@
 #  ---------------------------------------------------------------------------
 #  THE OPERATING POLICY, AND WHICH ENTRIES DEPEND ON IT
 #  ---------------------------------------------------------------------------
-#  Developer-stated, 2026-08-27, and NOT enforced by these scripts:
+#  A policy, not a control. These scripts do not enforce it:
 #
 #      The tools are never run natively in a real project folder. On the Mac,
 #      claude, codex and opencode are started only in empty folders, and only
@@ -212,8 +212,8 @@
 #            composer install --no-scripts
 #      * Read the diff of these files first, before you read anything else.
 #
-#  .claude/settings.local.json IS NOT HERE, AND IT USED TO LOOK LIKE THE WORST
-#  GAP IN THE FILE. It holds hooks and MCP entries, and it is normally
+#  .claude/settings.local.json IS NOT HERE, AND THAT LOOKS LIKE THE WORST GAP
+#  IN THE FILE. It holds hooks and MCP entries, and it is normally
 #  gitignored, so it is the one path here that could change without appearing
 #  in any diff you review. Three things decide it:
 #
@@ -390,22 +390,20 @@ pin    file   .mcp.json
 # ---------------------------------------------------------------------------
 #  THE AGENT CONTROL PLANES — narrow, not whole
 #
-#  These three used to be
+#  A FOLDER THE TOOL WRITES CANNOT BE PINNED WHOLE. Do not write these as
 #
 #      pin    dir    .claude
 #      pin    dir    .codex
 #      pin    dir    .opencode
 #
-#  which was wrong, and broke opencode on its first real run. A project-level
-#  .opencode is not only a place an attacker plants things; it is where opencode
-#  keeps its own housekeeping. It tried to create <project>/.opencode/.gitignore
-#  and died:
+#  A project-level .opencode is not only a place an attacker plants things; it
+#  is where opencode keeps its own housekeeping. Pin the whole folder and
+#  opencode cannot create <project>/.opencode/.gitignore. It then stops with:
 #
 #      Unknown: FileSystem.writeFile (.../.opencode/.gitignore)
 #
-#  The lesson generalises. A folder the TOOL writes cannot be pinned whole. So
-#  pin only the children that make the HOST run code later, and leave the folder
-#  itself writable.
+#  So pin only the children that make the HOST run code later, and leave the
+#  folder itself writable.
 #
 #  Which children those are: plugins and custom tools are executable code that
 #  the tool loads. Commands and agent definitions are prompts. Prompts are left

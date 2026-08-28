@@ -31,9 +31,7 @@
 #
 #  OBSERVED 2026-08-25. A run refused this once and opencode then died with
 #  "Unexpected server error", so it is needed at startup even when every model
-#  is local. Note the host is NOT models.dev, which is what this file guessed
-#  before anyone had run it. The guess was wrong, which is the argument for
-#  keeping this file evidence-led.
+#  is local. Note the host, which is models.opencode.ai and not models.dev.
 ^models\.opencode\.ai$
 
 #  models.dev is the catalogue project's own domain. Not seen in any log, so it
