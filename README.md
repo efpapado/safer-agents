@@ -10,10 +10,11 @@
 > own sandbox, so the blind spots of one may be the blind spots of the review.
 > And the code is what the comments say it is only where somebody checked.
 
-Run Claude Code, Codex or opencode on your project without giving them your Mac.
+Run Claude Code, Codex or opencode on a Drupal module without giving them your
+Mac.
 
 `safer-agent` is three wrapper commands. Each one starts its coding agent inside
-a Docker container that can edit your project and can do very little else. Your
+a Docker container that can edit one module and can do very little else. Your
 files change. Your machine does not.
 
 ```
@@ -22,8 +23,18 @@ safer-codex           # Codex
 safer-opencode        # opencode
 ```
 
-Run one from the folder you want to work in. That folder is mounted read-write,
-because the agent has to edit your code. Everything else is closed.
+**This project is built for Drupal work.** The image is PHP 8.3 command-line
+with the `mbstring` and `xml` extensions. It has no composer, no git and no
+database driver. The intended shape of a session is one module:
+
+1. `cd` into the module you are working on. That folder, and only that folder,
+   is mounted read-write. The agent writes its code there.
+2. Add what the agent must READ with `--add`: Drupal core, a contrib module,
+   another custom module, a theme, the vendor tree. Those mounts are read-only.
+3. Everything else on your Mac stays closed. The site root, `settings.php`, the
+   files directory and your database are not reachable.
+
+See [Working on a module](#working-on-a-module) for the paths.
 
 ---
 
@@ -91,8 +102,8 @@ themselves, so the folder can live anywhere. Keep the four parts together:
 ## Getting started
 
 ```bash
-cd ~/projects/my-site
-safer-claude
+cd ~/projects/my-site/web/modules/custom/my_module
+safer-claude --add ../../../core
 ```
 
 The first run builds the agent image and the gatekeeper image. That takes a few
@@ -103,7 +114,7 @@ While it starts, it tells you what it did:
 
 ```
 Config: throwaway copy — settings changed in the sandbox do not persist.
-History for this project: /Users/you/.claude/projects/-Users-you-projects-my-site
+History for this project: /Users/you/.claude/projects/-Users-you-...-custom-my_module
 Placeholders: 29 empty files and folders are created in the
               mounted trees so the agent cannot create them. They are
               removed when the session ends. See dangerous-paths.txt.
@@ -125,7 +136,7 @@ Log: /Users/you/tools/safer-agent/connection_logs/claude-2026-08-27T14-02-11.log
 NEW AUTO-RUN CANDIDATES
 -----------------------
   New executable files (1):
-    /Users/you/projects/my-site/scripts/deploy.sh
+    /Users/you/projects/my-site/web/modules/custom/my_module/scripts/import.sh
 ```
 
 Read that last section before you commit. It lists files that appeared during
@@ -134,13 +145,84 @@ it is a report, not a refusal.
 
 ### Your first session, in order
 
-1. `cd` into a project. Never run these commands from the launcher's own folder;
-   they refuse it.
-2. Run `safer-claude`. Wait for the build.
+1. `cd` into the module you want to change — not into the site root. Never run
+   these commands from the launcher's own folder; they refuse it.
+2. Run `safer-claude --add ../../../core`. Wait for the build.
 3. Work as usual.
 4. Quit. Read the exit report.
 5. Review the diff on your Mac before you commit. That step is not optional —
    see [What this does not protect you from](#what-this-does-not-protect-you-from).
+
+---
+
+## Working on a module
+
+The working directory is the one folder the agent can change. Choose the module,
+not the site.
+
+```
+~/projects/my-site/
+├── composer.json                     managed on the host, never in the sandbox
+├── vendor/                           --add   library source, vendored phpunit
+└── web/
+    ├── core/                         --add   almost every session
+    ├── sites/default/settings.php    never mounted. Credentials live here.
+    ├── sites/default/files/          never mounted. User uploads live here.
+    ├── modules/
+    │   ├── contrib/webform/          --add   when you hook into it
+    │   └── custom/
+    │       ├── my_module/            <- run here. Read-write.
+    │       └── my_other_module/      --add   when the two share a service
+    └── themes/custom/my_theme/       --add   for templates and preprocess work
+```
+
+Start the session in the module:
+
+```bash
+cd ~/projects/my-site/web/modules/custom/my_module
+```
+
+Then add what the agent must read. The paths are relative to the module:
+
+| To give the agent | Use |
+|---|---|
+| Drupal core | `--add ../../../core` |
+| A contrib module | `--add ../../contrib/webform` |
+| Another custom module | `--add ../my_other_module` |
+| A custom theme | `--add ../../../themes/custom/my_theme` |
+| The vendor tree | `--add ../../../../vendor` |
+
+### Why these mounts are read-only
+
+Composer owns `core/`, `modules/contrib/` and `vendor/`, and composer runs on
+your Mac. A change the agent makes in those trees is either lost at the next
+`composer install` or it survives and breaks the next update. Read-only removes
+the question. The agent can still read a service definition, follow a base
+class, or check a hook signature — which is all it needs core for.
+
+Use `--rw` only for a second custom module you are genuinely changing in the
+same session. The command asks you to type `yes`, because the folder is outside
+the project you started in.
+
+### What is not reachable, on purpose
+
+- **The site root.** Do not mount it. It carries `settings.php`, the files
+  directory and often a `.env`.
+- **The database.** The image has no `pdo_mysql` and no `mysqli`, and the
+  network is sealed. So Drupal kernel and functional tests cannot run in the
+  sandbox. Run those on your Mac.
+- **composer and drush.** Neither is installed. Dependency changes and site
+  commands stay on the host, where you can see them.
+
+What does work inside: `php -l` for syntax, and a unit-test runner that is
+already vendored in the project. Mount the tree with `--add ../../../../vendor`,
+then run it by its full relative path:
+
+```bash
+../../../../vendor/bin/phpunit tests/src/Unit
+```
+
+Unit tests only. Anything that boots Drupal needs the database.
 
 ---
 
@@ -154,8 +236,8 @@ safer-opencode [--add PATH] [--rw PATH] [--allow HOST] [--ollama] [--offline] [-
 
 | Flag | What it does |
 |---|---|
-| `--add PATH` | Mount another folder **read-only**. `--ro` is the same flag. Use it for reference material: a contrib module, a library's source. |
-| `--rw PATH` | Mount another folder **read-write**. The agent can change your Mac through it. A folder outside your project must be confirmed by typing `yes`. |
+| `--add PATH` | Mount another folder **read-only**. `--ro` is the same flag. This is the normal way to give the agent Drupal core, a contrib module, a theme or the vendor tree. Repeat it for each one. |
+| `--rw PATH` | Mount another folder **read-write**. The agent can change your Mac through it. Use it only for a second custom module you are really editing. A folder outside your project must be confirmed by typing `yes`. |
 | `--allow HOST` | Allow one more destination, for this run only. |
 | `--offline` | No network at all. The strongest mode, and the right one for a read-only analysis pass. |
 | `--effort LEVEL` | `safer-claude` only. `low`, `medium`, `high`, `xhigh` or `max`. Overrides `/effort` for the whole session, so leave it off for interactive work. |
@@ -172,15 +254,31 @@ safer-opencode [--add PATH] [--rw PATH] [--allow HOST] [--ollama] [--offline] [-
 
 ### Examples
 
-```bash
-# A contrib module the agent should read but not touch.
-safer-claude --add ../contrib/webform
+All of these are run from inside `web/modules/custom/my_module`.
 
-# Look inside the sandbox yourself.
-safer-claude --offline -- bash
+```bash
+# The everyday session: your module, plus core to read.
+safer-claude --add ../../../core
+
+# Extending a contrib module. Core, the contrib module, and the vendor tree.
+safer-claude --add ../../../core \
+             --add ../../contrib/webform \
+             --add ../../../../vendor
+
+# Two custom modules that share a service. The second one is editable too.
+safer-claude --add ../../../core --rw ../my_other_module
+
+# Twig and preprocess work: the theme is read-only reference.
+safer-claude --add ../../../core --add ../../../themes/custom/my_theme
+
+# A review pass over the module. Nothing needs the network.
+safer-claude --offline --add ../../../core
+
+# Look inside the sandbox yourself, and see exactly what the agent can see.
+safer-claude --offline --add ../../../core -- bash
 
 # opencode against a local model, with no internet at all.
-safer-opencode --ollama --offline
+safer-opencode --ollama --offline --add ../../../core
 ```
 
 ---
@@ -204,11 +302,15 @@ to be shared is bound back. Your Mac never reads that copy, so a hook the agent
 writes into it dies with the session. This is default-deny: anything not
 explicitly shared is simply not shared.
 
-**The project folder is a list.** A copy will not work here, because the point
+**The module folder is a list.** A copy will not work here, because the point
 of the mount is that the agent's work reaches your Mac. So the auto-run paths
 inside a code tree — `.githooks`, `.envrc`, `.vscode`, `.npmrc`, `Makefile`,
 project-level agent settings, CI definitions — are covered read-only, and the
-absent ones are pre-empted so the agent cannot create them either.
+absent ones are pre-empted so the agent cannot create them either. Every
+`--add` and `--rw` tree gets the same treatment, so a mounted `core/` or
+`modules/contrib/` folder is covered as well, and `.git` is masked in all of
+them. The exit scan then runs over the writable trees only, because those are
+the only ones that can gain a file.
 
 That second half is a blocklist, and a blocklist is never finished. So the
 session ends with a scan that reports what a list cannot cover: new files deep
@@ -237,9 +339,13 @@ Read this part. The rest of the README is the good news.
 - **Prompt injection from code already in the repository.** Mounted code may
   carry instructions aimed at the agent. Nothing here changes that.
 - **Files the agent must be allowed to edit.** `package.json` and
-  `composer.json` can carry install scripts. They are reported at exit, never
-  covered. Install with `npm ci --ignore-scripts` and
-  `composer install --no-scripts` as a habit.
+  `composer.json` can carry install scripts, and a module can ship its own. They
+  are reported at exit, never covered. Install with `npm ci --ignore-scripts`
+  and `composer install --no-scripts` as a habit.
+- **Drupal code that runs on your site.** A `.module` file, a hook, an event
+  subscriber or a Twig template runs the next time you load a page or clear the
+  cache. The sandbox has no database and no web server, so nothing runs there.
+  It runs when you point your site at the module.
 - **Deep paths and unpredictable names.** A `.vscode/tasks.json` written five
   folders down, or a `something.code-workspace` invented mid-session, cannot be
   pre-empted. They appear in the exit report instead.
@@ -355,6 +461,10 @@ These are recorded properly in the files that own them; this is the short list.
 - A run killed with `kill -9` skips the exit trap, so the placeholder files stay
   in your project and the exit scan does not run. Delete the empty files by
   hand.
+- No database driver, so Drupal kernel and functional tests cannot run in the
+  sandbox. `php -l` and unit tests work; everything else is a host job.
+- No composer and no drush. The agent cannot add a dependency, apply a patch or
+  clear a cache. It edits code, and you run the site commands yourself.
 - Cloud-backed Ollama models make their outbound connection from your Mac's
   daemon, not from the container, so the gatekeeper never sees that traffic and
   the log cannot record it. `safer-opencode` names any such model at startup.
@@ -368,8 +478,12 @@ it matters:
 
 - The agents are never run natively in a real project folder. On the Mac they
   are started only in empty folders, to change settings or update hooks.
-- Only code and config are mounted. Secret-bearing paths — `settings.php`,
-  `.env`, `~/.ssh` — are not.
+- Only code is mounted, and the read-write mount is a single module. Core,
+  contrib and vendor go in read-only when they are needed at all.
+- Secret-bearing paths are never mounted: `sites/default/settings.php`,
+  `sites/*/settings.local.php`, `sites/default/files/`, `.env`, `~/.ssh`.
+- The site root itself is not mounted, so a mount cannot pick those up by
+  accident.
 - Mounted code is treated as untrusted and is reviewed before anything runs on
   the host.
 
