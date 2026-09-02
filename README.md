@@ -118,6 +118,8 @@ History for this project: /Users/you/.claude/projects/-Users-you-...-custom-my_m
 Placeholders: 29 empty files and folders are created in the
               mounted trees so the agent cannot create them. They are
               removed when the session ends. See dangerous-paths.txt.
+              The empty files are hidden from `git status` until then,
+              through .git/info/exclude, which the agent cannot reach.
 Network: sealed, outbound only through the gatekeeper.
 Allowed destinations:
   ^api\.anthropic\.com$
@@ -460,7 +462,8 @@ These are recorded properly in the files that own them; this is the short list.
   see earlier container runs. `safer-claude` keeps this project's transcript.
 - A run killed with `kill -9` skips the exit trap, so the placeholder files stay
   in your project and the exit scan does not run. Delete the empty files by
-  hand.
+  hand. The `.git/info/exclude` entries that hid them stay too, but heal
+  themselves: the next launch removes a stale block before it writes its own.
 - No database driver, so Drupal kernel and functional tests cannot run in the
   sandbox. `php -l` and unit tests work; everything else is a host job.
 - No composer and no drush. The agent cannot add a dependency, apply a patch or

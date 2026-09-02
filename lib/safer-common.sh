@@ -266,6 +266,12 @@ PREEMPTED_PATHS=()     # host paths that did NOT exist when we covered them.
                        # Docker creates each one on your Mac to have something
                        # to mount on. Cleanup deletes them again. See the
                        # "residue" note in section 7.
+PREEMPTED_FILES=()     # the subset of PREEMPTED_PATHS that are FILES. Only
+                       # these are visible to git — `git status` does not
+                       # report an empty folder — so only these are hidden
+                       # from it. See hide_placeholders_from_git in section 7.
+EXCLUDE_FILE=""        # the project's .git/info/exclude, once resolved.
+                       # Empty when the project is not a git repository.
 CONFIG_SCAN_HOSTS=()   # config items bound back from your Mac: the host path
 CONFIG_SCAN_CONTS=()   # ...and where each appears in the container
 SCAN_ROOTS=()          # the writable trees the exit scan looks at
@@ -368,6 +374,11 @@ cleanup() {
 
     # --- 5. Remove the empty placeholders left in your project -------------
     remove_preempted_residue || true
+
+    #     ...and make the paths visible to git again. AFTER the removal, on
+    #     purpose: a placeholder that was not empty is left in place, and from
+    #     this moment it must show in `git status`.
+    remove_exclude_block || true
 
     # --- 5b. Report auto-run files that appeared during the session --------
     #
@@ -761,6 +772,13 @@ add_path_pin() {
     #  after the session, but only while it is still empty.
     if [[ ! -e "$host" ]]; then
         PREEMPTED_PATHS+=("$host")
+        # The FILE placeholders are also hidden from `git status` while the
+        # session runs — see hide_placeholders_from_git. Folders are not
+        # recorded for that: git never reports an empty folder, and a rule
+        # that hides nothing today could hide something after a crash.
+        if [[ "$type" != "dir" ]]; then
+            PREEMPTED_FILES+=("$host")
+        fi
     fi
 
     if [[ -d "$host" || ( ! -e "$host" && "$type" == "dir" ) ]]; then
@@ -995,6 +1013,113 @@ pin_dangerous_paths_in_tree() {
 
 
 # ---------------------------------------------------------------------------
+#  Hide the FILE placeholders from `git status` while the session runs.
+#
+#  The pre-emption pass above leaves empty files in your project, and
+#  `git status` in another terminal reports each one as a new file. That noise
+#  invites two mistakes: committing them, or "cleaning them up" mid-session.
+#  So the launcher lists them in .git/info/exclude for the duration of the
+#  run, and cleanup removes the entries again.
+#
+#  WHY .git/info/exclude AND NOT .gitignore. Both take the same syntax and
+#  both hide a path from `git status`. But .gitignore is a tracked file inside
+#  the mounted tree: the agent can write it, so at exit we could not tell our
+#  lines from the agent's, and a commit made from another terminal mid-session
+#  would capture our temporary lines into history. .git/info/exclude is never
+#  committed, and it lives inside .git — which the container masks, so the
+#  agent can never see it or touch it. Only this launcher, on the host side,
+#  can.
+#
+#  WHAT KEEPS IT SAFE. An ignore rule hides a PATH, not a file. A rule that
+#  outlived the session would silently hide a real file created later at that
+#  path — worse than the residue it replaces, because an empty leftover file
+#  is visible noise while a leftover rule is invisible silence. Three things
+#  close that hole:
+#
+#    * The entries sit between marker lines, and cleanup removes the block.
+#    * Every launch removes a stale block BEFORE writing its own. So a run
+#      killed with `kill -9`, which skips the exit trap, is healed by the
+#      next run.
+#    * Each entry is anchored ("/.envrc" matches only the top of the tree),
+#      and an ignore rule can never hide a change to a TRACKED file — git
+#      ignores apply to untracked paths only, and every placeholder was
+#      absent at launch.
+#
+#  The exit report is not weakened either way: it scans with `find`, not git.
+# ---------------------------------------------------------------------------
+EXCLUDE_BEGIN="# safer-agents: session placeholders (removed at exit) -- begin"
+EXCLUDE_END="# safer-agents: session placeholders -- end"
+
+hide_placeholders_from_git() {
+    local top path
+
+    # No git on the host, or not a git repository: nothing sees the files.
+    command -v git >/dev/null 2>&1 || return 0
+    top="$(git -C "$HOST_PATH" rev-parse --show-toplevel 2>/dev/null)" || return 0
+
+    # --git-path resolves the awkward layouts for us: in a worktree or a
+    # submodule, .git is a FILE and the real folder is elsewhere. The answer
+    # may come back relative to $HOST_PATH, so anchor it.
+    if ! EXCLUDE_FILE="$(git -C "$HOST_PATH" rev-parse --git-path info/exclude 2>/dev/null)"; then
+        EXCLUDE_FILE=""
+        return 0
+    fi
+    [[ "$EXCLUDE_FILE" == /* ]] || EXCLUDE_FILE="$HOST_PATH/$EXCLUDE_FILE"
+
+    # Heal first, write second. A stale block from a killed run must go even
+    # when THIS run has no placeholders to hide — that is why this function
+    # is called unconditionally.
+    remove_exclude_block
+
+    if [[ ${#PREEMPTED_FILES[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$EXCLUDE_FILE")"
+
+    {
+        echo "$EXCLUDE_BEGIN"
+        for path in ${PREEMPTED_FILES+"${PREEMPTED_FILES[@]}"}; do
+            # Only paths inside THIS repository. A placeholder in a --rw
+            # folder that is its own repository stays visible there.
+            [[ "$path" == "$top"/* ]] || continue
+            echo "/${path#"$top"/}"
+        done
+        echo "$EXCLUDE_END"
+    } >> "$EXCLUDE_FILE"
+
+    echo "              The empty files are hidden from \`git status\` until then,"
+    echo "              through .git/info/exclude, which the agent cannot reach."
+}
+
+# ---------------------------------------------------------------------------
+#  Remove the marker block again. Called from cleanup, and by the healing
+#  step above at the next launch when cleanup never ran.
+#
+#  The rewrite goes through a temporary file next to the original, so the
+#  final `mv` is a plain rename and a crash cannot leave the file half
+#  written.
+# ---------------------------------------------------------------------------
+remove_exclude_block() {
+    local tmp
+
+    [[ -n "$EXCLUDE_FILE" && -f "$EXCLUDE_FILE" ]] || return 0
+    grep -qF "$EXCLUDE_BEGIN" "$EXCLUDE_FILE" || return 0
+
+    tmp="$EXCLUDE_FILE.safer-agents.$$"
+    if ! awk -v b="$EXCLUDE_BEGIN" -v e="$EXCLUDE_END" '
+            $0 == b { skip = 1; next }
+            $0 == e { skip = 0; next }
+            !skip
+        ' "$EXCLUDE_FILE" > "$tmp"; then
+        rm -f "$tmp" 2>/dev/null || true
+        return 0
+    fi
+    mv "$tmp" "$EXCLUDE_FILE"
+}
+
+
+# ---------------------------------------------------------------------------
 #  The one call each command makes. Covers, in every mounted tree:
 #
 #    * .git, at any depth
@@ -1056,6 +1181,11 @@ safer_protect_paths() {
         echo "              mounted trees so the agent cannot create them. They are"
         echo "              removed when the session ends. See dangerous-paths.txt."
     fi
+
+    # Keep the placeholders out of `git status`, and heal whatever a killed
+    # run left in .git/info/exclude. Called even with zero placeholders,
+    # because the healing half must always run.
+    hide_placeholders_from_git
 
     # Last, and before the container starts, so the baseline is the tree as it
     # was when you launched. The placeholders do not appear in it: Docker

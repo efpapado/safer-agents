@@ -96,11 +96,15 @@
 #
 #       Step 2 has a visible side effect. Docker must have something to mount
 #       on, so it creates the empty file or folder in your project on the Mac.
-#       While the session runs, `git status` in another terminal shows these as
-#       new files. They are placeholders, not the agent's work. The exit trap
-#       deletes them again, but only while they are still empty. A run killed
-#       with `kill -9` skips that step and leaves them behind; delete those by
-#       hand.
+#       So that `git status` in another terminal does not report each one as a
+#       new file, the launcher lists the file placeholders in .git/info/exclude
+#       for the duration of the run. See hide_placeholders_from_git in
+#       lib/safer-common.sh for why that file and not .gitignore, and for what
+#       keeps a rule from outliving the session. The exit trap deletes the
+#       placeholders and the exclude entries again, but deletes a placeholder
+#       only while it is still empty. A run killed with `kill -9` skips both
+#       steps: delete the leftover empty files by hand; the exclude entries
+#       heal themselves at the next launch.
 #
 #       The more entries this file carries, the more placeholders appear. That
 #       is the running cost of every addition, and it is the reason not to add
