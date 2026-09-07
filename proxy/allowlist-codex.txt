@@ -31,7 +31,7 @@
 #  that looks like a proxy fault rather than an expired login.
 ^auth\.openai\.com$
 ^chatgpt\.com$
-
+^ab\.chatgpt\.com$
 
 # -----------------------------------------------------------------------------
 #  OPTIONAL
