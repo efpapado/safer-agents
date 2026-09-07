@@ -60,7 +60,9 @@
 #      the session. It blocks nothing. Read dangerous-paths.txt for what the
 #      list cannot cover and why.
 #
-#      Extra folders given with --add are mounted READ-ONLY. Only the project
+#      Extra folders given with --add are mounted READ-ONLY, and so are the
+#      Drupal folders chosen by name with --with-core, --with-modules,
+#      --with-contrib and --with-vendor (section 8b). Only the project
 #      folder, and anything given with --rw, can be written at all. --rw on a
 #      folder outside the project asks you to confirm it first; see section 8.
 #
@@ -1533,6 +1535,8 @@ confirm_rw_mount() {
 add_mount() {
     local MODE="$1"       # "ro" or "rw"
     local RAW="$2"        # what the user typed
+    local LABEL="${3:-}"  # the flag that chose the path, when you did not
+                          # type it yourself (--with-core and friends)
     local HOST
 
     if [[ ! -e "$RAW" ]]; then
@@ -1547,6 +1551,26 @@ add_mount() {
     reject_git_path "$RAW" "$HOST"
     reject_config_path "$RAW" "$HOST"
     check_mount_path "$HOST"
+
+    # The same folder twice would give Docker two mounts with one destination,
+    # which it refuses. Easy to do by accident now that --with-modules and
+    # --add ../../../modules can name the same folder, so settle it here.
+    # The working directory is always mounted read-write, so mounting it
+    # again would be the same mistake.
+    if [[ "$HOST" == "$(pwd -P)" ]]; then
+        echo "Note: $RAW is the working directory, which is always mounted. Skipped."
+        return 0
+    fi
+    local seen
+    for seen in ${MOUNT_ROOTS+"${MOUNT_ROOTS[@]}"}; do
+        if [[ "$HOST" == "$seen" ]]; then
+            if [[ "$MODE" == "rw" && "$(mount_is_writable "$HOST")" -ne 1 ]]; then
+                echo "Error: $RAW is already mounted read-only; it cannot also be --rw" >&2
+                exit 1
+            fi
+            return 0
+        fi
+    done
 
     MOUNT_ROOTS+=("$HOST")
 
@@ -1569,7 +1593,210 @@ add_mount() {
         echo "Writable: $HOST   (--rw)"
     else
         EXTRA_MOUNTS+=(--mount "type=bind,src=$HOST,dst=$HOST,readonly")
+        # A read-only path you typed yourself needs no echo. One a flag
+        # resolved for you does: it is the only way to see what it chose.
+        if [[ -n "$LABEL" ]]; then
+            echo "Read-only: $HOST   ($LABEL)"
+        fi
     fi
+}
+
+# =============================================================================
+#  SECTION 8b — Finding the Drupal folders by name
+#
+#  The everyday call from a module folder is
+#
+#      safer-claude --add ../../../core --add ../../../modules \
+#                   --add ../../../../vendor
+#
+#  and every one of those `../` has to be counted. The --with-* flags name the
+#  folder instead:
+#
+#      --with-core       <web root>/core
+#      --with-modules    <web root>/modules
+#      --with-contrib    <web root>/modules/contrib
+#      --with-vendor     the composer vendor folder
+#
+#  They are the same as --add: READ-ONLY, at the same path in the container as
+#  on your Mac, and covered by section 7 like every other mount. The only new
+#  part is how the path is found.
+#
+#  HOW THE PATH IS FOUND
+#  The flags cannot be a fixed `../../../core`, because you may run the
+#  command from a sub-folder of the module, or from a theme. So the lookup
+#  starts at the repository root and works down:
+#
+#    1. The repository root, from `git rev-parse --show-toplevel`. The command
+#       runs on your Mac, where git IS present; the container never sees it.
+#       Without git, or outside a repository, the lookup walks up from the
+#       working directory until it finds a `.git` entry.
+#
+#    2. The web root under it. First the `web-root` value in composer.json,
+#       then the usual names: web, docroot, html, public_html, public, and the
+#       repository root itself. A candidate counts only if it holds
+#       core/lib/Drupal.php, so a folder that merely has the right name is not
+#       enough.
+#
+#    3. If that repository has no web root — a contrib module cloned as its own
+#       repository inside a site, say — the lookup moves to the repository
+#       above it and tries again.
+#
+#  The vendor folder is looked for at <repository root>/vendor, then at the
+#  `vendor-dir` from composer.json, then at <web root>/vendor. It counts only
+#  if it holds autoload.php.
+#
+#  When nothing is found the command stops with a message, and --add PATH
+#  still works. Guessing a path here would mount the wrong folder without
+#  telling you, which is worse than stopping.
+# =============================================================================
+
+DRUPAL_REPO=""         # the repository root that holds the web root
+DRUPAL_WEB=""          # the web root, once found
+DRUPAL_VENDOR=""       # the vendor folder, once found
+
+# ---------------------------------------------------------------------------
+#  Print the repository root for a folder, or nothing when there is none.
+#
+#  git first, because it understands worktrees and submodules. When git is
+#  missing, or answers with an error (no repository, an ownership check, a
+#  stub that always fails), fall back to a plain walk up the folders, looking
+#  for a `.git` file or folder.
+# ---------------------------------------------------------------------------
+repo_root_of() {
+    local dir="$1"
+    local top
+
+    if command -v git >/dev/null 2>&1; then
+        if top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)"; then
+            echo "$top"
+            return 0
+        fi
+    fi
+
+    while [[ "$dir" != "/" ]]; do
+        if [[ -e "$dir/.git" ]]; then
+            echo "$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+#  Read one string value out of composer.json without a JSON parser.
+#
+#  $1  the key, such as web-root or vendor-dir
+#  $2  the composer.json file
+#
+#  Good enough here: composer writes these values on one line, as a plain
+#  string. A missing key prints nothing. A trailing slash is removed.
+# ---------------------------------------------------------------------------
+composer_value() {
+    local key="$1"
+    local file="$2"
+    local value
+
+    [[ -f "$file" ]] || return 0
+    value="$(sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" \
+             | head -n 1)"
+    echo "${value%/}"
+}
+
+# ---------------------------------------------------------------------------
+#  Print the web root under one repository root, or nothing.
+# ---------------------------------------------------------------------------
+web_root_under() {
+    local repo="$1"
+    local candidate name
+
+    for name in "$(composer_value web-root "$repo/composer.json")" \
+                web docroot html public_html public .; do
+        [[ -n "$name" ]] || continue
+        candidate="$repo/$name"
+        if [[ -f "$candidate/core/lib/Drupal.php" ]]; then
+            realpath "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+#  Fill DRUPAL_REPO, DRUPAL_WEB and DRUPAL_VENDOR. Runs once; later calls
+#  return at once.
+# ---------------------------------------------------------------------------
+locate_drupal() {
+    local start repo web vendor_dir
+
+    [[ -z "$DRUPAL_WEB" ]] || return 0
+
+    start="$(pwd -P)"
+    while repo="$(repo_root_of "$start")"; do
+        if web="$(web_root_under "$repo")"; then
+            DRUPAL_REPO="$repo"
+            DRUPAL_WEB="$web"
+            break
+        fi
+        # Not in this repository. Try the one that contains it, if any.
+        [[ "$repo" != "/" ]] || break
+        start="$(dirname "$repo")"
+    done
+
+    if [[ -z "$DRUPAL_WEB" ]]; then
+        echo "Error: no Drupal web root found above $(pwd -P)" >&2
+        echo "The --with-* flags look for core/lib/Drupal.php under the repository root." >&2
+        echo "Run from inside a Drupal site, or use --add PATH instead." >&2
+        exit 1
+    fi
+
+    vendor_dir="$(composer_value vendor-dir "$DRUPAL_REPO/composer.json")"
+    for start in "$DRUPAL_REPO/vendor" \
+                 "${vendor_dir:+$DRUPAL_REPO/$vendor_dir}" \
+                 "$DRUPAL_WEB/vendor"; do
+        [[ -n "$start" ]] || continue
+        if [[ -f "$start/autoload.php" ]]; then
+            DRUPAL_VENDOR="$(realpath "$start")"
+            break
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+#  Mount one named Drupal folder read-only.
+#
+#  $1  core | modules | contrib | vendor
+#  $2  the flag as typed, for messages
+# ---------------------------------------------------------------------------
+add_drupal_mount() {
+    local what="$1"
+    local flag="$2"
+    local target
+
+    locate_drupal
+
+    case "$what" in
+        core)    target="$DRUPAL_WEB/core" ;;
+        modules) target="$DRUPAL_WEB/modules" ;;
+        contrib) target="$DRUPAL_WEB/modules/contrib" ;;
+        vendor)
+            if [[ -z "$DRUPAL_VENDOR" ]]; then
+                echo "Error: $flag: no vendor folder with autoload.php found" >&2
+                echo "Looked under $DRUPAL_REPO and $DRUPAL_WEB. Run composer install," >&2
+                echo "or use --add PATH." >&2
+                exit 1
+            fi
+            target="$DRUPAL_VENDOR"
+            ;;
+    esac
+
+    if [[ ! -d "$target" ]]; then
+        echo "Error: $flag: folder not found: $target" >&2
+        echo "Use --add PATH to mount the folder by its own path." >&2
+        exit 1
+    fi
+
+    add_mount ro "$target" "$flag"
 }
 
 
@@ -2438,6 +2665,13 @@ parse_common_arg() {
             fi
             add_mount ro "$2"
             ARGS_CONSUMED=2
+            ;;
+
+        # Mount one of the Drupal folders READ-ONLY, found by name from the
+        # repository root. See section 8b.
+        --with-core|--with-modules|--with-contrib|--with-vendor)
+            add_drupal_mount "${1#--with-}" "$1"
+            ARGS_CONSUMED=1
             ;;
 
         # Mount a folder READ-WRITE. The agent can change your Mac through it,

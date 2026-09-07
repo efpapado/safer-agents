@@ -29,8 +29,10 @@ database driver. The intended shape of a session is one module:
 
 1. `cd` into the module you are working on. That folder, and only that folder,
    is mounted read-write. The agent writes its code there.
-2. Add what the agent must READ with `--add`: Drupal core, a contrib module,
-   another custom module, a theme, the vendor tree. Those mounts are read-only.
+2. Add what the agent must READ: Drupal core, a contrib module, another
+   custom module, a theme, the vendor tree. Use `--with-core`, `--with-modules`,
+   `--with-contrib` and `--with-vendor` for the standard folders, and `--add`
+   for anything else. Those mounts are read-only.
 3. Everything else on your Mac stays closed. The site root, `settings.php`, the
    files directory and your database are not reachable.
 
@@ -103,7 +105,7 @@ themselves, so the folder can live anywhere. Keep the four parts together:
 
 ```bash
 cd ~/projects/my-site/web/modules/custom/my_module
-safer-claude --add ../../../core
+safer-claude --with-core
 ```
 
 The first run builds the agent image and the gatekeeper image. That takes a few
@@ -149,7 +151,7 @@ it is a report, not a refusal.
 
 1. `cd` into the module you want to change — not into the site root. Never run
    these commands from the launcher's own folder; they refuse it.
-2. Run `safer-claude --add ../../../core`. Wait for the build.
+2. Run `safer-claude --with-core`. Wait for the build.
 3. Work as usual.
 4. Quit. Read the exit report.
 5. Review the diff on your Mac before you commit. That step is not optional —
@@ -165,13 +167,14 @@ not the site.
 ```
 ~/projects/my-site/
 ├── composer.json                     managed on the host, never in the sandbox
-├── vendor/                           --add   library source, vendored phpunit
+├── vendor/                           --with-vendor   library source, vendored phpunit
 └── web/
-    ├── core/                         --add   almost every session
+    ├── core/                         --with-core     almost every session
     ├── sites/default/settings.php    never mounted. Credentials live here.
     ├── sites/default/files/          never mounted. User uploads live here.
-    ├── modules/
+    ├── modules/                      --with-modules  every module at once
     │   ├── contrib/webform/          --add   when you hook into it
+    │   │                             --with-contrib  or all of contrib
     │   └── custom/
     │       ├── my_module/            <- run here. Read-write.
     │       └── my_other_module/      --add   when the two share a service
@@ -184,15 +187,51 @@ Start the session in the module:
 cd ~/projects/my-site/web/modules/custom/my_module
 ```
 
-Then add what the agent must read. The paths are relative to the module:
+Then add what the agent must read. The standard Drupal folders have a flag of
+their own. Anything else takes `--add` with a path relative to the module:
 
 | To give the agent | Use |
 |---|---|
-| Drupal core | `--add ../../../core` |
-| A contrib module | `--add ../../contrib/webform` |
+| Drupal core | `--with-core` (or `--add ../../../core`) |
+| Every module, custom and contrib | `--with-modules` |
+| All contrib modules | `--with-contrib` |
+| One contrib module | `--add ../../contrib/webform` |
 | Another custom module | `--add ../my_other_module` |
 | A custom theme | `--add ../../../themes/custom/my_theme` |
-| The vendor tree | `--add ../../../../vendor` |
+| The vendor tree | `--with-vendor` (or `--add ../../../../vendor`) |
+
+### How the `--with-*` flags find the folders
+
+The flags are not shortcuts for a fixed number of `../`. You may run the
+command from a sub-folder of the module, or from a theme, and the count would
+be wrong. So the command finds the folders from the top:
+
+1. It asks git for the repository root of the working directory. Git runs on
+   your Mac here, never in the sandbox. Without git it walks up the folders
+   until it finds a `.git` entry.
+2. Under that root it looks for the web root: the `web-root` value in
+   `composer.json` first, then `web`, `docroot`, `html`, `public_html`,
+   `public` and the root itself. A folder counts only if it holds
+   `core/lib/Drupal.php`.
+3. If the repository has no web root, for example when a module is its own
+   git repository inside a site, it moves to the repository above and looks
+   again.
+
+The vendor folder is looked for at the repository root, then at the
+`vendor-dir` from `composer.json`, then under the web root. It counts only if
+it holds `autoload.php`.
+
+When nothing is found the command stops and tells you. `--add PATH` always
+works as a fallback. Each flag prints the folder it resolved to at launch, so
+you can see what the agent got:
+
+```
+Read-only: /Users/you/projects/my-site/web/core   (--with-core)
+```
+
+`--with-modules` includes the module you are working in. That is fine: the
+module folder is mounted read-write on top, and only that folder can be
+written.
 
 ### Why these mounts are read-only
 
@@ -217,8 +256,8 @@ the project you started in.
   commands stay on the host, where you can see them.
 
 What does work inside: `php -l` for syntax, and a unit-test runner that is
-already vendored in the project. Mount the tree with `--add ../../../../vendor`,
-then run it by its full relative path:
+already vendored in the project. Mount the tree with `--with-vendor`, then run
+it by its full relative path:
 
 ```bash
 ../../../../vendor/bin/phpunit tests/src/Unit
@@ -231,14 +270,21 @@ Unit tests only. Anything that boots Drupal needs the database.
 ## Usage
 
 ```
-safer-claude   [--add PATH] [--rw PATH] [--allow HOST] [--effort LEVEL] [--offline] [-- COMMAND ...]
-safer-codex    [--add PATH] [--rw PATH] [--allow HOST] [--offline] [-- COMMAND ...]
-safer-opencode [--add PATH] [--rw PATH] [--allow HOST] [--ollama] [--offline] [-- COMMAND ...]
+safer-claude   [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
+               [--rw PATH] [--allow HOST] [--effort LEVEL] [--offline] [-- COMMAND ...]
+safer-codex    [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
+               [--rw PATH] [--allow HOST] [--offline] [-- COMMAND ...]
+safer-opencode [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
+               [--rw PATH] [--allow HOST] [--ollama] [--offline] [-- COMMAND ...]
 ```
 
 | Flag | What it does |
 |---|---|
 | `--add PATH` | Mount another folder **read-only**. `--ro` is the same flag. This is the normal way to give the agent Drupal core, a contrib module, a theme or the vendor tree. Repeat it for each one. |
+| `--with-core` | Mount `<web root>/core` **read-only**. The web root is found from the repository root, so the flag works from any folder inside the site. See [How the `--with-*` flags find the folders](#how-the---with--flags-find-the-folders). |
+| `--with-modules` | Mount `<web root>/modules` read-only: every custom and contrib module. |
+| `--with-contrib` | Mount `<web root>/modules/contrib` read-only. |
+| `--with-vendor` | Mount the composer vendor folder read-only. |
 | `--rw PATH` | Mount another folder **read-write**. The agent can change your Mac through it. Use it only for a second custom module you are really editing. A folder outside your project must be confirmed by typing `yes`. |
 | `--allow HOST` | Allow one more destination, for this run only. |
 | `--offline` | No network at all. The strongest mode, and the right one for a read-only analysis pass. |
@@ -260,27 +306,31 @@ All of these are run from inside `web/modules/custom/my_module`.
 
 ```bash
 # The everyday session: your module, plus core to read.
+safer-claude --with-core
+
+# The same, written out. --with-core is the same mount as this.
 safer-claude --add ../../../core
 
 # Extending a contrib module. Core, the contrib module, and the vendor tree.
-safer-claude --add ../../../core \
-             --add ../../contrib/webform \
-             --add ../../../../vendor
+safer-claude --with-core --add ../../contrib/webform --with-vendor
+
+# The whole site as reference: core, every module, and vendor.
+safer-claude --with-core --with-modules --with-vendor
 
 # Two custom modules that share a service. The second one is editable too.
-safer-claude --add ../../../core --rw ../my_other_module
+safer-claude --with-core --rw ../my_other_module
 
 # Twig and preprocess work: the theme is read-only reference.
-safer-claude --add ../../../core --add ../../../themes/custom/my_theme
+safer-claude --with-core --add ../../../themes/custom/my_theme
 
 # A review pass over the module. Nothing needs the network.
-safer-claude --offline --add ../../../core
+safer-claude --offline --with-core
 
 # Look inside the sandbox yourself, and see exactly what the agent can see.
-safer-claude --offline --add ../../../core -- bash
+safer-claude --offline --with-core -- bash
 
 # opencode against a local model, with no internet at all.
-safer-opencode --ollama --offline --add ../../../core
+safer-opencode --ollama --offline --with-core
 ```
 
 ---
@@ -438,6 +488,7 @@ the explanations are where the code is.
 | `lib/safer-common.sh` § 7 | How paths are covered, and why covering a file that exists is only half the job. |
 | `lib/safer-common.sh` § 7b | The exit scan: what it looks for and how it measures. |
 | `lib/safer-common.sh` § 8 | `--add` and `--rw`, and the confirmation. |
+| `lib/safer-common.sh` § 8b | The `--with-*` flags: how the repository root, the web root and the vendor folder are found. |
 | `lib/safer-common.sh` § 9 | The config strategy essay: why a throwaway copy beats a read-only mount, and why the hook risk disappears rather than being contained. |
 | `lib/safer-common.sh` § 10 | The sealed network, the gatekeeper, and the connection log. |
 | `lib/safer-common.sh` § 13 | When an image rebuilds, and why the check is not version-only. |

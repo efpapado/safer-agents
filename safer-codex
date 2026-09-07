@@ -6,6 +6,7 @@
 #  USAGE
 #      safer-codex
 #      safer-codex --ro ../../../core --ro ../../../../vendor
+#      safer-codex --with-core --with-vendor
 #      safer-codex --rw ../../contrib
 #      safer-codex --allow www.php.net
 #      safer-codex --offline
@@ -14,6 +15,10 @@
 #  FLAGS
 #      --add PATH      mount a host folder READ-ONLY, in addition to the
 #                      current directory. --ro means the same thing
+#      --with-core     mount a Drupal folder READ-ONLY, found by name from the
+#      --with-modules  repository root: <web root>/core, <web root>/modules,
+#      --with-contrib  <web root>/modules/contrib, or the composer vendor
+#      --with-vendor   folder. See section 8b of lib/safer-common.sh
 #      --rw PATH       mount a host folder read-WRITE. The agent can change
 #                      your Mac through it, so a folder outside the current
 #                      directory has to be confirmed
@@ -73,10 +78,15 @@ source "$SAFER_ROOT/lib/safer-common.sh"
 
 
 usage() {
-    echo "Usage: safer-codex [--add PATH] [--rw PATH] [--allow HOST]"
+    echo "Usage: safer-codex [--add PATH] [--with-core] [--with-modules]"
+    echo "                   [--with-contrib] [--with-vendor] [--rw PATH] [--allow HOST]"
     echo "                   [--offline] [-- COMMAND ...]"
     echo ""
     echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
+    echo "  --with-core     mount <web root>/core read-only, found from the"
+    echo "  --with-modules  repository root. Likewise <web root>/modules,"
+    echo "  --with-contrib  <web root>/modules/contrib and the composer"
+    echo "  --with-vendor   vendor folder. Saves counting ../ in --add"
     echo "  --rw PATH       mount a folder read-WRITE. The agent can change"
     echo "                  your Mac through it, so ask for it by name. A"
     echo "                  folder outside your project must be confirmed."
