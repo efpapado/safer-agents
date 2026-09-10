@@ -19,6 +19,8 @@
 #      --with-modules  repository root: <web root>/core, <web root>/modules,
 #      --with-contrib  <web root>/modules/contrib, or the composer vendor
 #      --with-vendor   folder. See section 8b of lib/safer-common.sh
+#      --with-config     the config export folder, read from settings.php
+#      --with-config-rw  the same, read-write
 #      --rw PATH       mount a host folder read-WRITE. The agent can change
 #                      your Mac through it, so a folder outside the current
 #                      directory has to be confirmed
@@ -117,7 +119,8 @@ source "$SAFER_ROOT/lib/safer-common.sh"
 
 usage() {
     echo "Usage: safer-codex [--add PATH] [--with-core] [--with-modules]"
-    echo "                   [--with-contrib] [--with-vendor] [--rw PATH] [--allow HOST]"
+    echo "                   [--with-contrib] [--with-vendor] [--with-config]"
+    echo "                   [--with-config-rw] [--rw PATH] [--allow HOST]"
     echo "                   [--offline] [-- COMMAND ...]"
     echo "       safer-codex --history | --merge-history"
     echo ""
@@ -126,6 +129,11 @@ usage() {
     echo "  --with-modules  repository root. Likewise <web root>/modules,"
     echo "  --with-contrib  <web root>/modules/contrib and the composer"
     echo "  --with-vendor   vendor folder. Saves counting ../ in --add"
+    echo "  --with-config   mount the config export folder read-only. Its place"
+    echo "                  is read from sites/default/settings.php on your Mac;"
+    echo "                  the parent of the sync folder is mounted, so config"
+    echo "                  split folders come along"
+    echo "  --with-config-rw  the same folder read-WRITE, for config export"
     echo "  --rw PATH       mount a folder read-WRITE. The agent can change"
     echo "                  your Mac through it, so ask for it by name. A"
     echo "                  folder outside your project must be confirmed."

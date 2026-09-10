@@ -31,7 +31,8 @@ database driver. The intended shape of a session is one module:
    is mounted read-write. The agent writes its code there.
 2. Add what the agent must READ: Drupal core, a contrib module, another
    custom module, a theme, the vendor tree. Use `--with-core`, `--with-modules`,
-   `--with-contrib` and `--with-vendor` for the standard folders, and `--add`
+   `--with-contrib`, `--with-vendor` and `--with-config` for the standard
+   folders, and `--add`
    for anything else. Those mounts are read-only.
 3. Everything else on your Mac stays closed. The site root, `settings.php`, the
    files directory and your database are not reachable.
@@ -168,9 +169,13 @@ not the site.
 ~/projects/my-site/
 ├── composer.json                     managed on the host, never in the sandbox
 ├── vendor/                           --with-vendor   library source, vendored phpunit
+├── config/                           --with-config   the config export, read-only
+│   ├── sync/                         --with-config-rw  the same, writable
+│   └── dev/                                          config_split folders come along
 └── web/
     ├── core/                         --with-core     almost every session
-    ├── sites/default/settings.php    never mounted. Credentials live here.
+    ├── sites/default/settings.php    never mounted. Credentials live here. The
+    │                                 launcher only reads the config path from it.
     ├── sites/default/files/          never mounted. User uploads live here.
     ├── modules/                      --with-modules  every module at once
     │   ├── contrib/webform/          --add   when you hook into it
@@ -199,6 +204,7 @@ their own. Anything else takes `--add` with a path relative to the module:
 | Another custom module | `--add ../my_other_module` |
 | A custom theme | `--add ../../../themes/custom/my_theme` |
 | The vendor tree | `--with-vendor` (or `--add ../../../../vendor`) |
+| The config export | `--with-config`, or `--with-config-rw` to let the agent export config |
 
 ### How the `--with-*` flags find the folders
 
@@ -220,6 +226,37 @@ be wrong. So the command finds the folders from the top:
 The vendor folder is looked for at the repository root, then at the
 `vendor-dir` from `composer.json`, then under the web root. It counts only if
 it holds `autoload.php`.
+
+The config folder has no fixed place. Drupal reads it from `settings.php`, so
+the command does the same, on your Mac:
+
+```php
+$settings['config_sync_directory'] = '../config/sync';
+```
+
+It reads `sites/default/settings.php`, then `settings.local.php` next to it,
+and takes the last line that sets `config_sync_directory`. Comment lines do
+not count. The Drupal 8 form `$config_directories[CONFIG_SYNC_DIRECTORY]` is
+accepted too. The value may be a plain string, or a string joined with
+`$app_root`, `DRUPAL_ROOT`, `dirname(DRUPAL_ROOT)`, `__DIR__` or `$site_path`.
+A relative path is relative to the web root, as in Drupal. A value the
+command cannot read, such as `getenv('CONFIG_DIR')`, stops it with the line
+shown. Use `--add PATH` or `--rw PATH` with the folder in that case.
+
+The mounted folder is the **parent** of `sync`, not `sync` itself. A site
+that uses `config_split` keeps one folder per split next to `sync`, and the
+agent needs those too. When that parent would contain the web root or your
+working directory, only `sync` is mounted, and a note says so. The command
+prints the folder it read, and where it read it from:
+
+```
+Config sync: /Users/you/projects/my-site/config/sync   (web/sites/default/settings.php:812)
+Read-only: /Users/you/projects/my-site/config   (--with-config)
+```
+
+`--with-config-rw` mounts the same folder read-write, so the agent can run a
+config export inside the sandbox. It is `--rw` on that folder, with the same
+confirmation: the folder is outside your module, so you type `yes` once.
 
 When nothing is found the command stops and tells you. `--add PATH` always
 works as a fallback. Each flag prints the folder it resolved to at launch, so
@@ -271,11 +308,14 @@ Unit tests only. Anything that boots Drupal needs the database.
 
 ```
 safer-claude   [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
+               [--with-config] [--with-config-rw]
                [--rw PATH] [--allow HOST] [--effort LEVEL] [--offline] [-- COMMAND ...]
 safer-codex    [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
+               [--with-config] [--with-config-rw]
                [--rw PATH] [--allow HOST] [--offline] [-- COMMAND ...]
 safer-codex    --history | --merge-history
 safer-opencode [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
+               [--with-config] [--with-config-rw]
                [--rw PATH] [--allow HOST] [--ollama] [--offline] [-- COMMAND ...]
 ```
 
@@ -286,6 +326,8 @@ safer-opencode [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--w
 | `--with-modules` | Mount `<web root>/modules` read-only: every custom and contrib module. |
 | `--with-contrib` | Mount `<web root>/modules/contrib` read-only. |
 | `--with-vendor` | Mount the composer vendor folder read-only. |
+| `--with-config` | Mount the config export folder read-only. Its place is read from `sites/default/settings.php` on your Mac. The parent of the `sync` folder is mounted, so `config_split` folders come along. |
+| `--with-config-rw` | The same folder **read-write**, so the agent can export config. Confirmed like `--rw`. |
 | `--rw PATH` | Mount another folder **read-write**. The agent can change your Mac through it. Use it only for a second custom module you are really editing. A folder outside your project must be confirmed by typing `yes`. |
 | `--allow HOST` | Allow one more destination, for this run only. |
 | `--offline` | No network at all. The strongest mode, and the right one for a read-only analysis pass. |
@@ -494,7 +536,7 @@ the explanations are where the code is.
 | `lib/safer-common.sh` § 7 | How paths are covered, and why covering a file that exists is only half the job. |
 | `lib/safer-common.sh` § 7b | The exit scan: what it looks for and how it measures. |
 | `lib/safer-common.sh` § 8 | `--add` and `--rw`, and the confirmation. |
-| `lib/safer-common.sh` § 8b | The `--with-*` flags: how the repository root, the web root and the vendor folder are found. |
+| `lib/safer-common.sh` § 8b | The `--with-*` flags: how the repository root, the web root, the vendor folder and the config folder are found. |
 | `lib/safer-common.sh` § 9 | The config strategy essay: why a throwaway copy beats a read-only mount, and why the hook risk disappears rather than being contained. |
 | `lib/safer-common.sh` § 10 | The sealed network, the gatekeeper, and the connection log. |
 | `lib/safer-common.sh` § 13 | When an image rebuilds, and why the check is not version-only. |

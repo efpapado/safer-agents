@@ -1610,7 +1610,7 @@ add_mount() {
         EXTRA_MOUNTS+=(--mount "type=bind,src=$HOST,dst=$HOST")
         # Say it at launch as well as in the log at exit. A writable folder is
         # worth seeing before the session, not only after it.
-        echo "Writable: $HOST   (--rw)"
+        echo "Writable: $HOST   (${LABEL:---rw})"
     else
         EXTRA_MOUNTS+=(--mount "type=bind,src=$HOST,dst=$HOST,readonly")
         # A read-only path you typed yourself needs no echo. One a flag
@@ -1636,10 +1636,13 @@ add_mount() {
 #      --with-modules    <web root>/modules
 #      --with-contrib    <web root>/modules/contrib
 #      --with-vendor     the composer vendor folder
+#      --with-config     the config export folder, read from settings.php
+#      --with-config-rw  the same folder, READ-WRITE
 #
 #  They are the same as --add: READ-ONLY, at the same path in the container as
 #  on your Mac, and covered by section 7 like every other mount. The only new
-#  part is how the path is found.
+#  part is how the path is found. --with-config-rw is the one exception: it is
+#  the same as --rw on that folder, with the same confirmation.
 #
 #  HOW THE PATH IS FOUND
 #  The flags cannot be a fixed `../../../core`, because you may run the
@@ -1665,6 +1668,38 @@ add_mount() {
 #  `vendor-dir` from composer.json, then at <web root>/vendor. It counts only
 #  if it holds autoload.php.
 #
+#  THE CONFIG FOLDER
+#  There is no fixed place for the config export. Drupal reads it from
+#  settings.php:
+#
+#      $settings['config_sync_directory'] = '../config/sync';
+#
+#  So the launcher reads it from there too, ON YOUR MAC. settings.php is never
+#  mounted; only the one value leaves it. The lookup reads
+#  <web root>/sites/default/settings.php, then settings.local.php in the same
+#  folder, and takes the last assignment that is not a comment. Drupal 8's
+#  $config_directories[CONFIG_SYNC_DIRECTORY] form is accepted as well.
+#
+#  The value is a PHP expression, and this script is not PHP. It resolves the
+#  forms that sites use in practice:
+#
+#      '../config/sync'                     relative to the web root, as Drupal
+#      $app_root . '/../config/sync'        does with relative paths
+#      DRUPAL_ROOT . '/../config/sync'
+#      dirname(DRUPAL_ROOT) . '/config/sync'
+#      __DIR__ . '/../../../config/sync'    relative to the settings.php folder
+#      $app_root . '/' . $site_path . '/files/config/sync'
+#
+#  Anything else — getenv(), a variable from another file, a function call —
+#  stops the command and prints the line it could not read. Use --add or --rw
+#  with the path yourself in that case.
+#
+#  What is mounted is the PARENT of the sync folder, not sync itself. A site
+#  that uses config_split keeps one folder per split next to sync, and the
+#  agent needs those too. The parent is refused when it would contain the web
+#  root, your working directory, or your home folder: then only the sync
+#  folder is mounted, and a note says so.
+#
 #  When nothing is found the command stops with a message, and --add PATH
 #  still works. Guessing a path here would mount the wrong folder without
 #  telling you, which is worse than stopping.
@@ -1673,6 +1708,7 @@ add_mount() {
 DRUPAL_REPO=""         # the repository root that holds the web root
 DRUPAL_WEB=""          # the web root, once found
 DRUPAL_VENDOR=""       # the vendor folder, once found
+DRUPAL_CONFIG_SYNC=""  # the config sync folder, once read from settings.php
 
 # ---------------------------------------------------------------------------
 #  Print the repository root for a folder, or nothing when there is none.
@@ -1783,15 +1819,169 @@ locate_drupal() {
 }
 
 # ---------------------------------------------------------------------------
+#  Print the last config sync assignment from the settings files, as
+#  "<file>:<line>:<php expression>". Nothing when there is none.
+#
+#  A line counts when it starts with $settings['config_sync_directory'] or
+#  $config_directories[...], after optional spaces. Lines that start with #
+#  or // do not, so the commented example in the default settings.php is
+#  skipped. Later files override earlier ones, as they do in Drupal.
+# ---------------------------------------------------------------------------
+config_sync_assignment() {
+    local file found=""
+
+    for file in "$DRUPAL_WEB/sites/default/settings.php" \
+                "$DRUPAL_WEB/sites/default/settings.local.php"; do
+        [[ -f "$file" ]] || continue
+        local hit
+        hit="$(grep -nE \
+            "^[[:space:]]*(\\\$settings\\[['\"]config_sync_directory['\"]\\]|\\\$config_directories\\[(CONFIG_SYNC_DIRECTORY|['\"]sync['\"])\\])[[:space:]]*=" \
+            "$file" | tail -n 1)" || true
+        [[ -n "$hit" ]] || continue
+        found="$file:${hit%%:*}:${hit#*=}"
+    done
+
+    [[ -n "$found" ]] || return 1
+    echo "$found"
+}
+
+# ---------------------------------------------------------------------------
+#  Turn the PHP expression on the right of the assignment into a path.
+#
+#  $1  the expression, up to and including the ;
+#
+#  The known names are replaced by quoted literals first. What is left must be
+#  quoted strings joined with dots, and nothing else. Prints the path, or
+#  returns 1 when the expression holds something it cannot evaluate.
+# ---------------------------------------------------------------------------
+resolve_config_expression() {
+    local expr="$1"
+    local parent_of_web settings_dir path
+
+    parent_of_web="$(dirname "$DRUPAL_WEB")"
+    settings_dir="$DRUPAL_WEB/sites/default"
+
+    # Trim spaces and the trailing semicolon and comment, if any.
+    expr="${expr%%;*}"
+    expr="$(printf '%s' "$expr" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+    # Replace the names Drupal defines with the values they have here. Longest
+    # first, so dirname(DRUPAL_ROOT) is not half-replaced.
+    expr="$(printf '%s' "$expr" | sed \
+        -e "s|dirname(DRUPAL_ROOT)|'$parent_of_web'|g" \
+        -e "s|dirname(\\\$app_root)|'$parent_of_web'|g" \
+        -e "s|DRUPAL_ROOT|'$DRUPAL_WEB'|g" \
+        -e "s|\\\$app_root|'$DRUPAL_WEB'|g" \
+        -e "s|__DIR__|'$settings_dir'|g" \
+        -e "s|\\\$site_path|'sites/default'|g")"
+
+    # Only single- or double-quoted strings joined by dots may remain. A $
+    # inside double quotes would be a variable, so it is not allowed either.
+    if ! printf '%s' "$expr" | grep -qE \
+        "^('[^']*'|\"[^\"\\$]*\")([[:space:]]*\\.[[:space:]]*('[^']*'|\"[^\"\\$]*\"))*$"; then
+        return 1
+    fi
+
+    # Join the pieces: drop the dots between the quotes, then the quotes.
+    path="$(printf '%s' "$expr" | sed \
+        -e "s/['\"][[:space:]]*\\.[[:space:]]*['\"]//g" \
+        -e "s/^['\"]//" -e "s/['\"]\$//")"
+
+    # Drupal reads a relative path from the web root.
+    [[ "$path" == /* ]] || path="$DRUPAL_WEB/$path"
+    echo "$path"
+}
+
+# ---------------------------------------------------------------------------
+#  Fill DRUPAL_CONFIG_SYNC from settings.php, or stop with a message.
+#
+#  $1  the flag as typed, for messages
+# ---------------------------------------------------------------------------
+locate_config_sync() {
+    local flag="$1"
+    local hit file line expr path
+
+    [[ -z "$DRUPAL_CONFIG_SYNC" ]] || return 0
+    locate_drupal
+
+    if [[ ! -f "$DRUPAL_WEB/sites/default/settings.php" ]]; then
+        echo "Error: $flag: no settings.php found at $DRUPAL_WEB/sites/default/" >&2
+        echo "The config folder is read from there. Use --add PATH or --rw PATH instead." >&2
+        exit 1
+    fi
+
+    if ! hit="$(config_sync_assignment)"; then
+        echo "Error: $flag: settings.php does not set config_sync_directory" >&2
+        echo "Looked in $DRUPAL_WEB/sites/default/settings.php and settings.local.php." >&2
+        echo "Use --add PATH or --rw PATH instead." >&2
+        exit 1
+    fi
+    file="${hit%%:*}"; hit="${hit#*:}"
+    line="${hit%%:*}"; expr="${hit#*:}"
+
+    if ! path="$(resolve_config_expression "$expr")"; then
+        echo "Error: $flag: cannot read the config path from ${file#"$DRUPAL_REPO"/}:$line" >&2
+        echo "    $(sed -n "${line}p" "$file" | sed -e 's/^[[:space:]]*//')" >&2
+        echo "Only plain strings, DRUPAL_ROOT, \$app_root, \$site_path and __DIR__ are" >&2
+        echo "understood. Use --add PATH or --rw PATH with the folder yourself." >&2
+        exit 1
+    fi
+
+    if [[ ! -d "$path" ]]; then
+        echo "Error: $flag: config sync folder not found: $path" >&2
+        echo "Read from ${file#"$DRUPAL_REPO"/}:$line. Export the config first, or use --add PATH." >&2
+        exit 1
+    fi
+
+    path="$(realpath "$path")"
+
+    # A sync folder that holds the web root would mount settings.php along
+    # with it. No real site is set up this way; a wrong line in settings.php
+    # is the likely cause, so stop rather than mount it.
+    if [[ "$DRUPAL_WEB" == "$path" || "$DRUPAL_WEB" == "$path"/* ]]; then
+        echo "Error: $flag: the config sync folder $path contains the web root" >&2
+        echo "Read from ${file#"$DRUPAL_REPO"/}:$line. Check that line, or use --add PATH." >&2
+        exit 1
+    fi
+
+    DRUPAL_CONFIG_SYNC="$path"
+    echo "Config sync: $DRUPAL_CONFIG_SYNC   (${file#"$DRUPAL_REPO"/}:$line)"
+}
+
+# ---------------------------------------------------------------------------
+#  Print the folder --with-config mounts: the parent of sync, or sync itself
+#  when the parent is too wide. See THE CONFIG FOLDER above.
+# ---------------------------------------------------------------------------
+config_mount_target() {
+    local parent here
+    parent="$(dirname "$DRUPAL_CONFIG_SYNC")"
+    here="$(pwd -P)"
+
+    if [[ "$parent" == "/" || "$parent" == "$HOME" \
+          || "$DRUPAL_WEB" == "$parent" || "$DRUPAL_WEB" == "$parent"/* \
+          || "$here" == "$parent" || "$here" == "$parent"/* ]]; then
+        echo "Note: the folder above sync is $parent, which holds the web root or" >&2
+        echo "your working directory. Only the sync folder is mounted." >&2
+        echo "$DRUPAL_CONFIG_SYNC"
+    else
+        echo "$parent"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 #  Mount one named Drupal folder read-only.
 #
-#  $1  core | modules | contrib | vendor
+#  $1  core | modules | contrib | vendor | config | config-rw
 #  $2  the flag as typed, for messages
+#
+#  config-rw is the one case that mounts read-write. It goes through the same
+#  confirmation as --rw, because the folder is outside your project.
 # ---------------------------------------------------------------------------
 add_drupal_mount() {
     local what="$1"
     local flag="$2"
     local target
+    local mode=ro
 
     locate_drupal
 
@@ -1799,6 +1989,15 @@ add_drupal_mount() {
         core)    target="$DRUPAL_WEB/core" ;;
         modules) target="$DRUPAL_WEB/modules" ;;
         contrib) target="$DRUPAL_WEB/modules/contrib" ;;
+        config)
+            locate_config_sync "$flag"
+            target="$(config_mount_target)"
+            ;;
+        config-rw)
+            locate_config_sync "$flag"
+            target="$(config_mount_target)"
+            mode=rw
+            ;;
         vendor)
             if [[ -z "$DRUPAL_VENDOR" ]]; then
                 echo "Error: $flag: no vendor folder with autoload.php found" >&2
@@ -1816,7 +2015,7 @@ add_drupal_mount() {
         exit 1
     fi
 
-    add_mount ro "$target" "$flag"
+    add_mount "$mode" "$target" "$flag"
 }
 
 
@@ -2767,7 +2966,7 @@ parse_common_arg() {
 
         # Mount one of the Drupal folders READ-ONLY, found by name from the
         # repository root. See section 8b.
-        --with-core|--with-modules|--with-contrib|--with-vendor)
+        --with-core|--with-modules|--with-contrib|--with-vendor|--with-config|--with-config-rw)
             add_drupal_mount "${1#--with-}" "$1"
             ARGS_CONSUMED=1
             ;;
