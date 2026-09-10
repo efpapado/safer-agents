@@ -157,6 +157,24 @@ fi
 
 LOG_DIR="$SAFER_ROOT/connection_logs"
 PROXY_DIR="$SAFER_ROOT/proxy"
+
+# ---------------------------------------------------------------------------
+#  Where session history lives when a tool cannot keep it per project itself.
+#
+#  Claude Code sorts transcripts by project on its own, so safer-claude binds
+#  back one folder of ~/.claude/projects. Codex keeps every project's sessions
+#  in one pile, so safer-codex gives each module its own pile here:
+#
+#      history/codex/<module slug>/sessions/
+#
+#  Kept in this folder, not in ~/.codex and not in the module, for three
+#  reasons. It is already a protected root, so --add, --rw and the working
+#  directory check refuse it without new code. The .gitignore that hides the
+#  contents lives in this repository root, which is never mounted, so the agent
+#  cannot edit it. And it moves with the launcher to a new machine. Contents
+#  are ignored by git; see history/README.md.
+# ---------------------------------------------------------------------------
+HISTORY_DIR="$SAFER_ROOT/history"
 PROXY_CONF="$PROXY_DIR/tinyproxy.conf"
 
 # ---------------------------------------------------------------------------
@@ -259,6 +277,8 @@ NO_PROXY_HOSTS="localhost,127.0.0.1"
 EXTRA_MOUNTS=()        # --mount arguments for --add / --ro / --rw folders
 MOUNT_ROOTS=()         # the host paths of those folders, for the path scans
 RW_MOUNTS=()           # just the ones given with --rw, for the run log
+STORE_MOUNTS=()        # history folders bound back read-write by rw_store,
+                       # for the run log: they are writable too
 GIT_MASKS=()           # --mount arguments that hide .git directories
 GIT_MASKS_SEEN=$'\n'   # a newline-delimited string used as a crude "set", to
                        # avoid masking the same .git twice
@@ -1842,11 +1862,13 @@ add_drupal_mount() {
 #
 #  A SIDE EFFECT WORTH KNOWING
 #
-#  Prompt history and session stores are not bound back. They hold prompts and
-#  file contents from every other project you have worked on, which is not
-#  something a sandbox limited to one project should be able to read. They are
-#  now per-session and disappear on exit. For claude, this project's transcript
-#  is the one exception — see safer-claude.
+#  Prompt history and session stores are not bound back from your Mac. They
+#  hold prompts and file contents from every other project you have worked on,
+#  which is not something a sandbox limited to one project should be able to
+#  read. They are per-session and disappear on exit, with two exceptions that
+#  each cover ONE project: claude binds back this project's transcript folder
+#  (see safer-claude), and codex binds back a per-module store kept under
+#  $HISTORY_DIR (see rw_store below and safer-codex).
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -2204,6 +2226,75 @@ rw_back() {
     CONFIG_SCAN_CONTS+=("$CUR_CONT/$name")
 }
 
+# ---------------------------------------------------------------------------
+#  The folder name Claude Code uses for one project under ~/.claude/projects:
+#  the full path with every character that is not a letter or digit replaced
+#  by a dash. safer-codex uses the same name under $HISTORY_DIR, so the two
+#  tools' history folders for one module read the same.
+# ---------------------------------------------------------------------------
+project_slug() {
+    printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'
+}
+
+# ---------------------------------------------------------------------------
+#  Bind one item back READ-WRITE from a store folder that is NOT the tool's
+#  config folder. This is rw_back with a different source.
+#
+#  $1 store folder on your Mac, for example $HISTORY_DIR/codex/<slug>
+#  $2 item name; appears at $CUR_CONT/$2 in the container
+#
+#  The store is created if missing, readable by you only. The agent can write
+#  to it, so three checks run first, because the agent also wrote what is in
+#  there from earlier runs:
+#
+#    - no part of the path from the store down may be a symlink. A link
+#      planted in an earlier run could otherwise point the mount anywhere,
+#      and Docker resolves the source path on your Mac, not in the container
+#    - the folders must be yours
+#    - the folders must be folders
+#
+#  Docker only mounts the leaf. Its parents, and whatever else sits next to
+#  it in $HISTORY_DIR or the launcher folder, stay out of the container.
+# ---------------------------------------------------------------------------
+rw_store() {
+    local store="$1"
+    local name="$2"
+    local path
+
+    # The symlink check comes BEFORE mkdir and chmod. Both follow a link, so
+    # on a planted link `chmod 0700` would change the mode of whatever the
+    # link points at.
+    for path in "$store" "$store/$name"; do
+        if [[ -L "$path" ]]; then
+            echo "Error: $path is a symlink; refusing to mount it" >&2
+            echo "The agent writes to this store. Inspect it by hand before running again." >&2
+            exit 1
+        fi
+    done
+
+    mkdir -p "$store/$name"
+    chmod 0700 "$store" "$store/$name"
+
+    for path in "$store" "$store/$name"; do
+        if [[ ! -d "$path" ]]; then
+            echo "Error: $path is not a folder; refusing to mount it" >&2
+            exit 1
+        fi
+        if [[ ! -O "$path" ]]; then
+            echo "Error: $path is not owned by you; refusing to mount it" >&2
+            exit 1
+        fi
+    done
+
+    check_mount_path "$store/$name"
+    check_mount_path "$CUR_CONT/$name"
+    CONFIG_MOUNTS+=(--mount "type=bind,src=$store/$name,dst=$CUR_CONT/$name")
+
+    CONFIG_SCAN_HOSTS+=("$store/$name")
+    CONFIG_SCAN_CONTS+=("$CUR_CONT/$name")
+    STORE_MOUNTS+=("$store/$name")
+}
+
 
 # =============================================================================
 #  SECTION 10 — The network
@@ -2536,6 +2627,13 @@ save_connection_log() {
             # these are the only places it could have happened.
             for rw in "${RW_MOUNTS[@]}"; do
                 echo "# --rw:       $rw   (read-write)"
+            done
+        fi
+        if [[ ${#STORE_MOUNTS[@]} -gt 0 ]]; then
+            # Session history the tool keeps between runs. Writable, so it
+            # belongs in this list; but it holds transcripts, not code.
+            for rw in "${STORE_MOUNTS[@]}"; do
+                echo "# history:    $rw   (read-write)"
             done
         fi
         echo "# allowlists: $ALLOWLIST_COMMON"

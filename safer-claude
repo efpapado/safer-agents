@@ -246,7 +246,7 @@ build_config() {
     # folder name is the project path with every character that is not a letter
     # or digit replaced by a dash. Transcripts the agent writes for any other
     # project land in the throwaway copy and are discarded.
-    slug="$(printf '%s' "$HOST_PATH" | sed 's/[^A-Za-z0-9]/-/g')"
+    slug="$(project_slug "$HOST_PATH")"
     rw_back "projects/$slug"
 
     echo "History for this project: $CFG_HOST/projects/$slug"

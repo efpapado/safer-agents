@@ -27,6 +27,12 @@
 #                      so this is only useful with `-- bash` for local analysis)
 #      -- COMMAND      run COMMAND instead of codex
 #
+#      --history       list the saved sandbox sessions, per module, and stop.
+#                      Runs on your Mac; no container is started
+#      --merge-history copy every saved sandbox session into your Mac's
+#                      ~/.codex, so the native `codex resume --all` can show
+#                      them. Copies only; never moves or deletes. Stops after
+#
 #  There is no --effort here: that is a Claude Code setting. There is no
 #  --ollama either: that belongs to safer-opencode.
 #
@@ -43,21 +49,53 @@
 #  in lib/safer-common.sh.
 #
 #  ---------------------------------------------------------------------------
-#  SESSION HISTORY DOES NOT PERSIST — and why
+#  SESSION HISTORY PERSISTS — per module, in this launcher's own folder
 #  ---------------------------------------------------------------------------
-#  `codex resume` will not see sessions from earlier container runs.
+#  `codex resume` sees the sessions from earlier container runs started in the
+#  same module. They are kept in
 #
-#  This is a deliberate trade, not an oversight. Codex names its sessions by
-#  date, not by project, and keeps prompt history in one shared file. Binding
-#  that store back into the container would expose the prompts and file
-#  contents of EVERY project you have ever worked on to a sandbox that is meant
-#  to see one. It is all or nothing, and none is the safer default.
+#      <launcher folder>/history/codex/<module slug>/sessions/
+#      <launcher folder>/history/codex/<module slug>/archived_sessions/
 #
-#  Claude Code does not have this problem, because it stores transcripts per
-#  project, so safer-claude can bind back just the one.
+#  where the slug is the module path with every non-letter turned into a dash,
+#  the same name Claude Code uses under ~/.claude/projects.
 #
-#  If you want the history back and accept what it exposes, there is a one-line
-#  change marked in build_config() below.
+#  WHY NOT SIMPLY BIND BACK ~/.codex/sessions
+#  Codex keeps every project's sessions in one pile, sorted by date, not by
+#  project. Binding that pile into the container would show a sandbox meant
+#  for one module the prompts and file excerpts of every project you have ever
+#  worked on, and let it change them. So the launcher does the sorting Codex
+#  does not: one pile per module, and only that pile is mounted. The other
+#  modules' piles sit next to it on your Mac and are never in the container.
+#
+#  WHY IN THIS FOLDER
+#  The launcher folder is already a protected root: --add, --rw and the
+#  working-directory check all refuse it. The .gitignore that hides the
+#  contents is in this repository root, which is never mounted, so the agent
+#  cannot un-ignore its own transcripts. And the whole thing moves with the
+#  launcher when you set up a new Mac. See HISTORY_DIR in lib/safer-common.sh
+#  and history/README.md.
+#
+#  WHAT PERSISTS AND WHAT DOES NOT
+#  Only the two session folders. Everything else in ~/.codex is still the
+#  throwaway copy: config.toml, hooks, the prompt history file history.jsonl,
+#  logs, and the SQLite index Codex builds over its sessions. That index is
+#  rebuilt from the session files each run — Codex scans the files first and
+#  treats the index as a cache — so the first `codex resume` of a run may take
+#  a moment longer with many saved sessions. The prompt history (the up-arrow
+#  list) is not kept, because Codex writes it as one file for all projects.
+#
+#  WHAT THIS DOES NOT CHANGE
+#  Mounts and network come from the command line of the CURRENT run, never
+#  from anything recorded in a session. Resuming without an --add you gave last
+#  time takes that folder away again — but the conversation still remembers
+#  what it read from it. A transcript is agent output, written by the agent
+#  into a folder the agent can write: read it as such, not as an audit log.
+#
+#  Your native Codex does not see these sessions, because they are not in
+#  ~/.codex. `safer-codex --history` lists them; `safer-codex --merge-history`
+#  copies them into ~/.codex when you want them there. See the two functions
+#  at the bottom of this file.
 # =============================================================================
 
 set -euo pipefail
@@ -81,6 +119,7 @@ usage() {
     echo "Usage: safer-codex [--add PATH] [--with-core] [--with-modules]"
     echo "                   [--with-contrib] [--with-vendor] [--rw PATH] [--allow HOST]"
     echo "                   [--offline] [-- COMMAND ...]"
+    echo "       safer-codex --history | --merge-history"
     echo ""
     echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
     echo "  --with-core     mount <web root>/core read-only, found from the"
@@ -92,6 +131,9 @@ usage() {
     echo "                  folder outside your project must be confirmed."
     echo "  --allow HOST    allow one extra destination for this run only"
     echo "  --offline       no network at all"
+    echo ""
+    echo "  --history       list the saved sandbox sessions per module. No container."
+    echo "  --merge-history copy them into your Mac's ~/.codex (copy, never move)."
     echo ""
     echo "The folder you run in is always read-write. Inside every mounted"
     echo "folder, .git and the paths in dangerous-paths.txt are covered so"
@@ -117,6 +159,7 @@ DEFAULT_COMMAND=(codex)
 
 CFG_HOST="$HOME/.codex"                  # on your Mac
 CFG_CONT="/home/agent/.codex"            # inside the container
+STORE_ROOT="$HISTORY_DIR/codex"          # one folder per module, see header
 
 # The config folder is NOT mounted directly. See build_config() below.
 PROTECTED_ROOTS+=("$CFG_HOST")
@@ -160,28 +203,190 @@ build_config() {
     # rather than exposed by default.
     ro_back hooks.json AGENTS.md prompts themes model-catalogs
 
+    # This module's sessions, from the per-module store in the launcher
+    # folder. NOT from ~/.codex: see the header. Both folders Codex lists from
+    # are bound, so that archiving a session inside the sandbox has somewhere
+    # persistent to move it to.
+    local store
+    store="$STORE_ROOT/$(project_slug "$HOST_PATH")"
+    rw_store "$store" sessions
+    rw_store "$store" archived_sessions
+
     # NOT bound back, so they are per-session and discarded:
-    #   history.jsonl   prompt history from every project
-    #   sessions/       the session store, and the SQLite state database
+    #   history.jsonl    prompt history from every project, one file
+    #   state_*.sqlite   the index over the sessions; rebuilt from the files
     #   log/
-    #
-    # To trade this back — accepting that the sandbox then sees every project's
-    # prompts and file excerpts — add this one line:
-    #     rw_back sessions
-    echo "Config: throwaway copy — settings and session history do not persist."
+    echo "History for this module: $store"
+    echo "Config: throwaway copy — settings changed in the sandbox do not persist."
+}
+
+
+# =============================================================================
+#  Looking at the saved history from your Mac
+#
+#  Two commands that never start a container. They read the per-module stores
+#  and, for --merge-history, write into your Mac's ~/.codex. Both treat the
+#  stores as what they are — folders the agent wrote to — and therefore:
+#
+#    - never follow a symlink. `find` without -L does not descend into linked
+#      folders and -type f does not match a link, so a link planted by the
+#      agent is skipped, not resolved
+#    - copy only files whose relative path has exactly the shape Codex writes:
+#        sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl
+#      or the same under archived_sessions/. Anything else is listed as
+#      skipped
+#    - never overwrite. A file that already exists in ~/.codex is left alone,
+#      so the merge can be run as often as you like
+#    - never delete or move. The store stays complete; deleting a module's
+#      history is a decision you make with `rm -r` on that one folder
+#
+#  The copied files land in the layout Codex itself uses, so your native
+#  `codex resume --all` lists them after its next scan. Note --all: without it
+#  the picker shows only sessions whose recorded folder is the folder you are
+#  in, and you start Codex natively in an empty folder, never in the module.
+# =============================================================================
+
+# The shape a session file's relative path must have. Extended regex, for
+# `grep -E`. One letter class per segment, so a name with a slash trick, a
+# space or a leading dot cannot match.
+SESSION_PATH_RE='^(sessions|archived_sessions)/[0-9]{4}/[0-9]{2}/[0-9]{2}/rollout-[A-Za-z0-9._-]+\.jsonl$'
+
+# ---------------------------------------------------------------------------
+#  Print every session file in one module's store, one relative path per line,
+#  sorted. Only regular files with the expected path shape. Symlinks and
+#  anything oddly named are counted into the variable named by $2 and not
+#  printed.
+#
+#  $1 the module's store folder
+# ---------------------------------------------------------------------------
+list_store_sessions() {
+    local store="$1"
+    local rel
+
+    # -mindepth 5 / -maxdepth 5: exactly <kind>/YYYY/MM/DD/<file>, no more,
+    # no less. The relative path is then checked against the regex as well;
+    # the depth limit only keeps the scan cheap.
+    find "$store" -mindepth 5 -maxdepth 5 -type f -name 'rollout-*.jsonl' 2>/dev/null \
+        | while IFS= read -r path; do
+            rel="${path#"$store"/}"
+            if printf '%s\n' "$rel" | grep -Eq "$SESSION_PATH_RE"; then
+                printf '%s\n' "$rel"
+            fi
+        done | sort
+}
+
+# ---------------------------------------------------------------------------
+#  safer-codex --history
+#
+#  One block per module: the slug, how many sessions, the newest day. Enough
+#  to decide whether a module's history is worth keeping or merging.
+# ---------------------------------------------------------------------------
+history_overview() {
+    local store count newest
+
+    if [[ ! -d "$STORE_ROOT" ]]; then
+        echo "No saved history yet: $STORE_ROOT does not exist."
+        echo "It is created the first time safer-codex runs in a module."
+        return 0
+    fi
+
+    echo "Saved sandbox sessions, per module, in $STORE_ROOT"
+    echo ""
+    for store in "$STORE_ROOT"/*/; do
+        [[ -d "$store" ]] || continue
+        store="${store%/}"
+        count="$(list_store_sessions "$store" | wc -l | tr -d ' ')"
+        # Newest day, read off the path: the third to fifth segments are the
+        # date. `sort` above already put the newest last within each kind, so
+        # take the maximum date across both kinds.
+        newest="$(list_store_sessions "$store" \
+            | sed -E 's#^[^/]+/([0-9]{4})/([0-9]{2})/([0-9]{2})/.*#\1-\2-\3#' \
+            | sort | tail -n 1)"
+        echo "  $(basename "$store")"
+        echo "      sessions: $count    newest: ${newest:-—}"
+    done
+    echo ""
+    echo "To copy them into your Mac's ~/.codex:   safer-codex --merge-history"
+    echo "To forget one module's history:          rm -r $STORE_ROOT/<slug>"
+}
+
+# ---------------------------------------------------------------------------
+#  safer-codex --merge-history
+#
+#  Copy every well-formed session file from every module's store into ~/.codex,
+#  keeping the sessions/YYYY/MM/DD layout. Existing files are skipped, so
+#  nothing in ~/.codex is ever overwritten.
+# ---------------------------------------------------------------------------
+history_merge() {
+    local store rel src dst copied skipped total_copied=0 total_skipped=0
+
+    if [[ ! -d "$STORE_ROOT" ]]; then
+        echo "Nothing to merge: $STORE_ROOT does not exist."
+        return 0
+    fi
+
+    echo "Copying sandbox sessions into $CFG_HOST (existing files are left alone)"
+    echo ""
+    for store in "$STORE_ROOT"/*/; do
+        [[ -d "$store" ]] || continue
+        store="${store%/}"
+        copied=0
+        skipped=0
+
+        while IFS= read -r rel; do
+            [[ -n "$rel" ]] || continue
+            src="$store/$rel"
+            dst="$CFG_HOST/$rel"
+
+            if [[ -e "$dst" || -L "$dst" ]]; then
+                skipped=$((skipped + 1))
+                continue
+            fi
+
+            mkdir -p "$(dirname "$dst")"
+            # cp of a regular file, checked above by find -type f. No -R, no
+            # -a, so nothing but that one file's bytes are copied.
+            cp "$src" "$dst"
+            chmod 0600 "$dst"
+            copied=$((copied + 1))
+        done < <(list_store_sessions "$store")
+
+        echo "  $(basename "$store")"
+        echo "      copied: $copied    already present: $skipped"
+        total_copied=$((total_copied + copied))
+        total_skipped=$((total_skipped + skipped))
+    done
+
+    echo ""
+    echo "Copied $total_copied file(s); $total_skipped were already in $CFG_HOST."
+    echo "Your native picker lists them with:  codex resume --all"
+    echo "The stores under $STORE_ROOT are unchanged."
 }
 
 
 # =============================================================================
 #  Read the command line
 #
-#  Codex adds no flags of its own, so every argument goes to the shared parser.
-#  See section 11 of lib/safer-common.sh.
+#  --history and --merge-history are handled here, because they run on your Mac
+#  and stop. Every other argument goes to the shared parser; see section 11 of
+#  lib/safer-common.sh.
 # =============================================================================
 
 while [[ $# -gt 0 ]]; do             # $# = how many arguments are left
-    parse_common_arg "$@"
-    shift "$ARGS_CONSUMED"
+    case "$1" in
+        --history)
+            history_overview
+            exit 0
+            ;;
+        --merge-history)
+            history_merge
+            exit 0
+            ;;
+        *)
+            parse_common_arg "$@"
+            shift "$ARGS_CONSUMED"
+            ;;
+    esac
 done
 
 safer_resolve_command

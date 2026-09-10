@@ -77,3 +77,9 @@ This folder must never be mounted into the container — an agent that can edit
 these files can erase the record of what it tried. Each command refuses to run
 with its working directory anywhere inside the launcher folder, and `--add` and
 `--ro` refuse it too.
+
+The one thing from the launcher folder that does enter a container is the
+current module's Codex history, `../history/codex/<module slug>/`. Docker
+mounts that leaf folder alone; this folder, `../proxy/` and the other modules'
+history are its neighbours on disk but are not reachable from inside. The
+header of each log lists it under `history:` because it is writable.

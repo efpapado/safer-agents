@@ -274,6 +274,7 @@ safer-claude   [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--w
                [--rw PATH] [--allow HOST] [--effort LEVEL] [--offline] [-- COMMAND ...]
 safer-codex    [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
                [--rw PATH] [--allow HOST] [--offline] [-- COMMAND ...]
+safer-codex    --history | --merge-history
 safer-opencode [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
                [--rw PATH] [--allow HOST] [--ollama] [--offline] [-- COMMAND ...]
 ```
@@ -290,6 +291,8 @@ safer-opencode [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--w
 | `--offline` | No network at all. The strongest mode, and the right one for a read-only analysis pass. |
 | `--effort LEVEL` | `safer-claude` only. `low`, `medium`, `high`, `xhigh` or `max`. Overrides `/effort` for the whole session, so leave it off for interactive work. |
 | `--ollama` | `safer-opencode` only. Reach the Ollama server on your Mac. Inference and read-only queries pass; model downloads, uploads and deletions are refused. |
+| `--history` | `safer-codex` only. List the saved sandbox sessions per module and stop. No container starts. |
+| `--merge-history` | `safer-codex` only. Copy every saved sandbox session into your Mac's `~/.codex`, so the native `codex resume --all` lists them. Copies only; existing files are left alone. |
 | `-- COMMAND ...` | Run something else instead of the agent. `-- bash` gives you a shell in the sandbox, which is the fastest way to see what the agent can see. |
 
 ### Environment variables
@@ -450,6 +453,9 @@ proxy/ollama.conf             the forwarder's default-deny rules
 
 connection_logs/              <tool>-<timestamp>.log, the newest 30 per tool
 connection_logs/README.md     how to read them
+
+history/codex/<module slug>/  Codex session history, one folder per module.
+history/README.md             Ignored by git, apart from the README.
 ```
 
 ---
@@ -498,6 +504,7 @@ the explanations are where the code is.
 | `proxy/ollama.conf` | Which Ollama endpoints are permitted, and which are refused. |
 | `connection_logs/README.md` | How to read a log, how to decide whether to allow a host, and what the logs cannot tell you. |
 | `connection_logs/*.log` | What each run tried to reach and what appeared in your project. |
+| `history/README.md` | Where Codex session history is kept, why it is here, and how to list, merge or delete it. |
 
 ---
 
@@ -509,8 +516,18 @@ These are recorded properly in the files that own them; this is the short list.
   does it automatically, which means an upgrade makes one session start slowly.
 - Settings changed inside the sandbox do not persist. That is the config
   strategy working, not a bug.
-- `codex` and `opencode` session history is per-session. `codex resume` will not
-  see earlier container runs. `safer-claude` keeps this project's transcript.
+- `opencode` session history is per-session and disappears with the container.
+  `safer-claude` keeps this project's transcript in `~/.claude/projects`.
+  `safer-codex` keeps this module's sessions in `history/codex/` inside the
+  launcher folder, so `codex resume` works across runs. Your native Codex does
+  not see them until you run `safer-codex --merge-history`. The prompt history
+  file and the SQLite index are not kept; Codex rebuilds the index from the
+  session files, so the first `codex resume` of a run can be slow.
+- A resumed Codex conversation remembers excerpts from folders you mounted
+  last time, even if you leave the `--add` off this time. Mounts and network
+  always come from the current command line, never from the transcript.
+- A session transcript sits in a folder the agent can write. Read it as agent
+  output, not as a record of what happened.
 - A run killed with `kill -9` skips the exit trap, so the placeholder files stay
   in your project and the exit scan does not run. Delete the empty files by
   hand. The `.git/info/exclude` entries that hid them stay too, but heal
