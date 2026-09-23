@@ -97,6 +97,8 @@
 #      proxy/allowlist-opencode.txt
 #
 #      connection_logs/             one file per run, named claude-<time>.log
+#      sessions/                    one record per RUNNING run; a leftover one
+#                                   means the run died hard. See section 7c
 #
 #  ---------------------------------------------------------------------------
 #  A FEW BASH NOTES, since these files are meant to be readable
@@ -157,6 +159,10 @@ fi
 
 LOG_DIR="$SAFER_ROOT/connection_logs"
 PROXY_DIR="$SAFER_ROOT/proxy"
+
+# One record per RUNNING session. A record that is still here after its run
+# has ended means the run died without cleanup. See section 7c.
+SESSIONS_DIR="$SAFER_ROOT/sessions"
 
 # ---------------------------------------------------------------------------
 #  Where session history lives when a tool cannot keep it per project itself.
@@ -294,6 +300,9 @@ PREEMPTED_FILES=()     # the subset of PREEMPTED_PATHS that are FILES. Only
                        # from it. See hide_placeholders_from_git in section 7.
 EXCLUDE_FILE=""        # the project's .git/info/exclude, once resolved.
                        # Empty when the project is not a git repository.
+SESSION_RECORD=""      # the file in sessions/ that lists what this run left
+                       # on your Mac, so a killed run can be repaired later.
+                       # See section 7c.
 CONFIG_SCAN_HOSTS=()   # config items bound back from your Mac: the host path
 CONFIG_SCAN_CONTS=()   # ...and where each appears in the container
 SCAN_ROOTS=()          # the writable trees the exit scan looks at
@@ -402,6 +411,13 @@ cleanup() {
     #     this moment it must show in `git status`.
     remove_exclude_block || true
 
+    #     The run has cleaned up after itself, so its session record has done
+    #     its job. AFTER the two steps above: if either of them fails, the
+    #     record stays and `--repair` can finish the work.
+    if [[ -n "$SESSION_RECORD" ]]; then
+        rm -f "$SESSION_RECORD" || true
+    fi
+
     # --- 5b. Report auto-run files that appeared during the session --------
     #
     #     AFTER step 5, deliberately. Step 5 deletes the empty placeholders
@@ -436,22 +452,44 @@ cleanup() {
 #  recorded path never sits inside another. Order does not matter.
 #
 #  A run that dies without the exit trap — a power loss, `kill -9` — still
-#  leaves the placeholders behind. Delete those by hand.
+#  leaves the placeholders behind. The session record in sessions/ lists
+#  them, and `--repair` deletes them with the same two rules. See section 7c.
 # ---------------------------------------------------------------------------
 remove_preempted_residue() {
     local path
 
     for path in ${PREEMPTED_PATHS+"${PREEMPTED_PATHS[@]}"}; do
-        # A symlink here is not something we made. Leave it alone.
-        if [[ -L "$path" ]]; then
-            continue
-        fi
-        if [[ -d "$path" ]]; then
-            rmdir "$path" 2>/dev/null || true
-        elif [[ -f "$path" && ! -s "$path" ]]; then
-            rm -f "$path" 2>/dev/null || true
-        fi
+        remove_placeholder "$path" || true
     done
+}
+
+# ---------------------------------------------------------------------------
+#  Delete ONE placeholder, if it is still ours to delete.
+#
+#  Returns 0 when the path is gone afterwards, whether we removed it or it was
+#  never there. Returns 1 when something is at the path that we must not
+#  touch: a symlink, a file with content, a folder with content.
+#
+#  Shared by cleanup at exit and by `--repair` later, so the two can never
+#  disagree about what is safe to remove.
+# ---------------------------------------------------------------------------
+remove_placeholder() {
+    local path="$1"
+
+    # A symlink here is not something we made. Leave it alone.
+    if [[ -L "$path" ]]; then
+        return 1
+    fi
+    if [[ -d "$path" ]]; then
+        rmdir "$path" 2>/dev/null || return 1
+        return 0
+    fi
+    if [[ -f "$path" ]]; then
+        [[ ! -s "$path" ]] || return 1
+        rm -f "$path" 2>/dev/null || return 1
+        return 0
+    fi
+    return 0
 }
 trap cleanup EXIT
 
@@ -1122,22 +1160,27 @@ hide_placeholders_from_git() {
 #  final `mv` is a plain rename and a crash cannot leave the file half
 #  written.
 # ---------------------------------------------------------------------------
+#  $1  the exclude file to clean. Defaults to this run's EXCLUDE_FILE. The
+#      argument exists for `--repair`, which cleans files that belong to OTHER
+#      runs and must not disturb this run's own state.
+# ---------------------------------------------------------------------------
 remove_exclude_block() {
+    local file="${1:-$EXCLUDE_FILE}"
     local tmp
 
-    [[ -n "$EXCLUDE_FILE" && -f "$EXCLUDE_FILE" ]] || return 0
-    grep -qF "$EXCLUDE_BEGIN" "$EXCLUDE_FILE" || return 0
+    [[ -n "$file" && -f "$file" ]] || return 0
+    grep -qF "$EXCLUDE_BEGIN" "$file" || return 0
 
-    tmp="$EXCLUDE_FILE.safer-agents.$$"
+    tmp="$file.safer-agents.$$"
     if ! awk -v b="$EXCLUDE_BEGIN" -v e="$EXCLUDE_END" '
             $0 == b { skip = 1; next }
             $0 == e { skip = 0; next }
             !skip
-        ' "$EXCLUDE_FILE" > "$tmp"; then
+        ' "$file" > "$tmp"; then
         rm -f "$tmp" 2>/dev/null || true
         return 0
     fi
-    mv "$tmp" "$EXCLUDE_FILE"
+    mv "$tmp" "$file"
 }
 
 
@@ -1166,6 +1209,10 @@ mount_is_writable() {
 
 safer_protect_paths() {
     local root i
+
+    # Finish the cleanup of any run that died without its exit trap, before
+    # this run leaves a record of its own. See section 7c.
+    repair_stale_sessions launch
 
     load_dangerous_paths
 
@@ -1209,12 +1256,268 @@ safer_protect_paths() {
     # because the healing half must always run.
     hide_placeholders_from_git
 
+    # Write down what this run has just put on your Mac, so that a run killed
+    # with `kill -9` can be repaired later. See section 7c.
+    write_session_record
+
     # Last, and before the container starts, so the baseline is the tree as it
     # was when you launched. The placeholders do not appear in it: Docker
     # creates those at `docker run`, later than this. That is correct — an
     # empty placeholder is removed again by remove_preempted_residue, and one
     # that is NOT empty at exit is something you want to hear about.
     record_scan_baseline
+}
+
+
+# =============================================================================
+#  SECTION 7c — The session record, and repairing a run that died hard
+#
+#  WHY THIS EXISTS
+#  Section 7 leaves two things on your Mac for the length of a session: the
+#  empty placeholders that Docker creates as mount points, and the block of
+#  ignore rules in .git/info/exclude that hides them. Cleanup removes both.
+#  But cleanup runs from the EXIT trap, and `kill -9`, a power loss or a
+#  terminal killed hard skip the trap. The launcher knew the list of
+#  placeholders and the location of the exclude file only in memory, so after
+#  such a death you had to find them by hand — with the stale ignore rules
+#  hiding the very files you were looking for.
+#
+#  THE RECORD
+#  Before the container starts, the run writes one file to sessions/:
+#
+#      sessions/claude-2026-09-23T11-02-40.session
+#
+#  It lists the exclude file it wrote to and every placeholder it created, in
+#  a format both you and `--repair` can read. Cleanup deletes the record as
+#  its last step. So the rule is simple: a record that still exists after
+#  its run has ended belongs to a run that died without cleanup.
+#
+#  THE REPAIR
+#  `safer-<tool> --repair` reads every record in sessions/, deletes each
+#  placeholder that is still empty, removes the marker block from each exclude
+#  file, and then deletes the record. It uses the SAME functions as cleanup,
+#  so it can never do more than cleanup would have done. It needs no Docker
+#  and no project folder. Every launch also runs it first, so a single new run
+#  of any tool, in any project, heals what an earlier one left behind.
+#
+#  WHAT A LIVE RUN LOOKS LIKE
+#  You may run safer-claude in one project while safer-codex runs in another.
+#  The second launch must NOT repair the first one's record: its placeholders
+#  are mount points of a running container. So each record carries the
+#  launcher's process id, and a record whose process is still alive and is a
+#  safer-* command is skipped. After a reboot, process ids can be reused, so
+#  the command-line check matters: `kill -0` alone would be fooled.
+#
+#  WHY sessions/ AND NOT THE PROJECT
+#  The record must survive the death of the run, be visible to a later run of
+#  a DIFFERENT tool in a DIFFERENT project, and be unreachable from inside the
+#  container. The launcher folder is all three: it is never mounted, and
+#  --add, --ro and the working directory check all refuse it.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+#  Write this run's record. Called once from safer_protect_paths, after the
+#  placeholders and the exclude block are decided and before `docker run`.
+#
+#  Nothing to record means no file: a run with zero placeholders leaves
+#  nothing behind that a repair could fix.
+# ---------------------------------------------------------------------------
+write_session_record() {
+    local stamp path type
+
+    if [[ ${#PREEMPTED_PATHS[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    mkdir -p "$SESSIONS_DIR"
+    stamp="$(date +%Y-%m-%dT%H-%M-%S)"
+    SESSION_RECORD="$SESSIONS_DIR/$TOOL-$stamp.$$.session"
+
+    {
+        echo "# safer-agents session record"
+        echo "#"
+        echo "# Written by safer-$TOOL when this run started. Deleted when the run ends"
+        echo "# normally. IF YOU ARE READING THIS AND THE RUN IS OVER, the run died"
+        echo "# without cleanup (kill -9, a power loss, a terminal closed hard) and it"
+        echo "# left the things listed below on your Mac."
+        echo "#"
+        echo "# To undo them, run this from any folder:"
+        echo "#"
+        echo "#     safer-$TOOL --repair"
+        echo "#"
+        echo "# It deletes each placeholder that is still empty, removes the block of"
+        echo "# ignore rules between the two marker lines in the exclude file, and then"
+        echo "# deletes this record. A placeholder with content is left alone and"
+        echo "# reported: the agent wrote it, or you did, and it is not ours to delete."
+        echo "# The next launch of any safer-* command does the same repair on its own."
+        echo "#"
+        echo "# The lines below are what --repair reads. One fact per line: a keyword,"
+        echo "# then its value. Lines starting with # and blank lines are ignored."
+        echo "#"
+        echo "#   pid <n>                     the launcher's process id. A record whose"
+        echo "#                               process is still running is skipped"
+        echo "#   exclude <file>              .git/info/exclude of the project, holding"
+        echo "#                               a block between these two marker lines:"
+        echo "#                                 $EXCLUDE_BEGIN"
+        echo "#                                 $EXCLUDE_END"
+        echo "#   placeholder file <path>     an empty file Docker created as a mount"
+        echo "#   placeholder dir <path>      point. Deleted by --repair if still empty"
+        echo ""
+        echo "tool $TOOL"
+        echo "started $stamp"
+        echo "pid $$"
+        echo "project $HOST_PATH"
+        if [[ -n "$EXCLUDE_FILE" && ${#PREEMPTED_FILES[@]} -gt 0 ]]; then
+            echo "exclude $EXCLUDE_FILE"
+        fi
+        for path in ${PREEMPTED_PATHS+"${PREEMPTED_PATHS[@]}"}; do
+            echo "placeholder $(placeholder_type "$path") $path"
+        done
+    } > "$SESSION_RECORD"
+    chmod 0600 "$SESSION_RECORD"
+}
+
+# Is this placeholder a file or a folder? PREEMPTED_FILES holds the files.
+placeholder_type() {
+    local f
+    for f in ${PREEMPTED_FILES+"${PREEMPTED_FILES[@]}"}; do
+        if [[ "$f" == "$1" ]]; then
+            echo file
+            return 0
+        fi
+    done
+    echo dir
+}
+
+# ---------------------------------------------------------------------------
+#  Is the run that wrote a record still alive?
+#
+#  $1  the process id from the record
+#
+#  Two checks, because each alone is wrong in one direction. `kill -0` says
+#  whether ANY process has that id, and ids are reused after a reboot. The
+#  command line says whether it is one of ours. `ps -o command=` prints just
+#  the command line, on macOS and on Linux; /proc/<pid>/cmdline is the
+#  fallback for a Linux box without ps.
+#
+#  When the id is taken but the command line cannot be read at all, the
+#  answer is "live". Wrongly skipping a stale record costs one more --repair
+#  later. Wrongly repairing a live run deletes the mount points of a running
+#  container. The two mistakes are not equal, so the doubt goes one way.
+# ---------------------------------------------------------------------------
+session_is_live() {
+    local pid="$1" cmd
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+
+    if command -v ps >/dev/null 2>&1; then
+        cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    elif [[ -r "/proc/$pid/cmdline" ]]; then
+        cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    else
+        return 0
+    fi
+    [[ "$cmd" == *safer-* ]]
+}
+
+# ---------------------------------------------------------------------------
+#  Repair every stale record in sessions/.
+#
+#  $1  "launch" when called at the start of a run: silent unless a stale
+#      record was found. Anything else, or nothing: the `--repair` command,
+#      which always says what it found.
+#
+#  The record's paths are trusted the same way PREEMPTED_PATHS is trusted at
+#  exit: remove_placeholder deletes only what is still empty. So the worst a
+#  damaged or edited record can do is delete an empty file or folder.
+# ---------------------------------------------------------------------------
+repair_stale_sessions() {
+    local mode="${1:-command}"
+    local record stale=0
+    local key rest path pid tool started project exclude
+    local removed kept understood
+
+    if [[ ! -d "$SESSIONS_DIR" ]]; then
+        [[ "$mode" == "launch" ]] || echo "Nothing to repair: no session records."
+        return 0
+    fi
+
+    for record in "$SESSIONS_DIR"/*.session; do
+        [[ -f "$record" ]] || continue
+
+        pid=""; tool=""; started=""; project=""; exclude=""
+        removed=0; kept=0
+
+        # First pass: the process id, so a live run is skipped before anything
+        # of its is touched. `read key rest` splits at the FIRST run of
+        # spaces only: the keyword lands in $key and everything after it,
+        # spaces included, in $rest. (IFS is left at its default on purpose;
+        # `IFS= read` would switch that splitting off.)
+        while read -r key rest; do
+            [[ "$key" == "pid" ]] && pid="$rest"
+        done < <(grep -v '^#' "$record")
+
+        if session_is_live "$pid"; then
+            if [[ "$mode" != "launch" ]]; then
+                echo "Skipping $(basename "$record"): its run is still active (pid $pid)."
+            fi
+            continue
+        fi
+
+        stale=1
+        echo "Repairing $(basename "$record"):"
+
+        # Second pass: undo what the record lists.
+        understood=0
+        while read -r key rest; do
+            case "$key" in
+                tool)     tool="$rest" ;;
+                started)  started="$rest" ;;
+                project)  project="$rest" ;;
+                exclude)  exclude="$rest"; understood=1 ;;
+                placeholder)
+                    understood=1
+                    # `read` split off the keyword; $rest is "<type> <path>".
+                    # Drop the type: remove_placeholder looks at what is on
+                    # disk. The path may contain spaces, so only the FIRST
+                    # space is a separator.
+                    path="${rest#* }"
+                    if remove_placeholder "$path"; then
+                        removed=$((removed + 1))
+                    else
+                        kept=$((kept + 1))
+                        echo "  kept    $path   (has content, or is a symlink)"
+                    fi
+                    ;;
+            esac
+        done < <(grep -v '^#' "$record")
+
+        echo "  run:     safer-$tool started $started in $project"
+        echo "  removed: $removed empty placeholders, kept $kept"
+
+        if [[ -n "$exclude" && -f "$exclude" ]] \
+           && grep -qF "$EXCLUDE_BEGIN" "$exclude"; then
+            remove_exclude_block "$exclude"
+            echo "  cleaned: ignore rules removed from $exclude"
+        fi
+
+        # A record with nothing we recognise is not ours to throw away: it
+        # may be damaged, or written by a newer launcher. Leave it for a
+        # human, and say so.
+        if [[ "$understood" -eq 0 ]]; then
+            echo "  WARNING: no exclude or placeholder lines found. Record left in place:"
+            echo "           $record"
+            continue
+        fi
+
+        rm -f "$record"
+    done
+
+    if [[ "$stale" -eq 0 && "$mode" != "launch" ]]; then
+        echo "Nothing to repair: every session record belongs to a run that is still active,"
+        echo "or there are none."
+    fi
 }
 
 
@@ -2994,6 +3297,13 @@ parse_common_arg() {
         --offline)
             OFFLINE=1
             ARGS_CONSUMED=1
+            ;;
+
+        # Finish the cleanup of a run that died without its exit trap, and
+        # stop. No container, no project folder needed. See section 7c.
+        --repair)
+            repair_stale_sessions
+            exit 0
             ;;
 
         -h|--help)

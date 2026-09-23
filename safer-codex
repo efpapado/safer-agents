@@ -10,6 +10,7 @@
 #      safer-codex --rw ../../contrib
 #      safer-codex --allow www.php.net
 #      safer-codex --offline
+#      safer-codex --repair
 #      safer-codex -- bash
 #
 #  FLAGS
@@ -27,6 +28,9 @@
 #      --allow HOST    permit one extra network destination for this run only
 #      --offline       no network at all (the agent cannot reach the model API,
 #                      so this is only useful with `-- bash` for local analysis)
+#      --repair        finish the cleanup of a run that died without its exit
+#                      trap (kill -9, power loss), then stop. No container.
+#                      See sessions/README.md
 #      -- COMMAND      run COMMAND instead of codex
 #
 #      --history       list the saved sandbox sessions, per module, and stop.
@@ -122,6 +126,7 @@ usage() {
     echo "                   [--with-contrib] [--with-vendor] [--with-config]"
     echo "                   [--with-config-rw] [--rw PATH] [--allow HOST]"
     echo "                   [--offline] [-- COMMAND ...]"
+    echo "       safer-codex --repair"
     echo "       safer-codex --history | --merge-history"
     echo ""
     echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
@@ -139,6 +144,8 @@ usage() {
     echo "                  folder outside your project must be confirmed."
     echo "  --allow HOST    allow one extra destination for this run only"
     echo "  --offline       no network at all"
+    echo "  --repair        undo what a run killed with kill -9 left behind,"
+    echo "                  then stop. No container. See sessions/README.md"
     echo ""
     echo "  --history       list the saved sandbox sessions per module. No container."
     echo "  --merge-history copy them into your Mac's ~/.codex (copy, never move)."

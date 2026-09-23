@@ -571,9 +571,12 @@ These are recorded properly in the files that own them; this is the short list.
 - A session transcript sits in a folder the agent can write. Read it as agent
   output, not as a record of what happened.
 - A run killed with `kill -9` skips the exit trap, so the placeholder files stay
-  in your project and the exit scan does not run. Delete the empty files by
-  hand. The `.git/info/exclude` entries that hid them stay too, but heal
-  themselves: the next launch removes a stale block before it writes its own.
+  in your project, the `.git/info/exclude` entries that hid them stay too, and
+  the exit scan does not run. Each run writes a record of both to `sessions/`
+  before it starts, and deletes it when it ends normally. Run
+  `safer-claude --repair` (any of the three commands) to undo what a dead run
+  left, or just launch again: every launch does the same repair first. See
+  `sessions/README.md`.
 - No database driver, so Drupal kernel and functional tests cannot run in the
   sandbox. `php -l` and unit tests work; everything else is a host job.
 - No composer and no drush. The agent cannot add a dependency, apply a patch or

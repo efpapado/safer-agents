@@ -1,3 +1,6 @@
 connection_logs/*.log
 history/*
 !history/README.md
+sessions/*
+!sessions/README.md
+proxy/.allowlist.effective*

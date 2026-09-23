@@ -11,6 +11,7 @@
 #      safer-claude --allow www.php.net
 #      safer-claude --effort high
 #      safer-claude --offline
+#      safer-claude --repair
 #      safer-claude -- bash
 #
 #  FLAGS
@@ -29,6 +30,9 @@
 #      --effort LEVEL  low, medium, high, xhigh or max. See the note below
 #      --offline       no network at all (the agent cannot reach the model API,
 #                      so this is only useful with `-- bash` for local analysis)
+#      --repair        finish the cleanup of a run that died without its exit
+#                      trap (kill -9, power loss), then stop. No container.
+#                      See sessions/README.md
 #      -- COMMAND      run COMMAND instead of claude
 #
 #  WHERE THE REST OF THE LOGIC IS
@@ -91,6 +95,7 @@ usage() {
     echo "                    [--with-contrib] [--with-vendor] [--with-config]"
     echo "                    [--with-config-rw] [--rw PATH] [--allow HOST]"
     echo "                    [--effort LEVEL] [--offline] [-- COMMAND ...]"
+    echo "       safer-claude --repair"
     echo ""
     echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
     echo "  --with-core     mount <web root>/core read-only, found from the"
@@ -108,6 +113,8 @@ usage() {
     echo "  --allow HOST    allow one extra destination for this run only"
     echo "  --effort LEVEL  low | medium | high | xhigh | max"
     echo "  --offline       no network at all"
+    echo "  --repair        undo what a run killed with kill -9 left behind,"
+    echo "                  then stop. No container. See sessions/README.md"
     echo ""
     echo "The folder you run in is always read-write. Inside every mounted"
     echo "folder, .git and the paths in dangerous-paths.txt are covered so"
