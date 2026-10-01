@@ -1097,7 +1097,7 @@ pin_dangerous_paths_in_tree() {
 #  close that hole:
 #
 #    * The entries sit between marker lines, and cleanup removes the block.
-#    * Every launch removes a stale block BEFORE writing its own. So a run
+#    * Every launch removes the STALE blocks BEFORE writing its own. So a run
 #      killed with `kill -9`, which skips the exit trap, is healed by the
 #      next run.
 #    * Each entry is anchored ("/.envrc" matches only the top of the tree),
@@ -1105,10 +1105,37 @@ pin_dangerous_paths_in_tree() {
 #      ignores apply to untracked paths only, and every placeholder was
 #      absent at launch.
 #
+#  ONE BLOCK PER RUN, NOT ONE PER FILE. Two modules in the same Drupal site
+#  share one repository, so two sessions — one in each module — write the
+#  same exclude file. The marker lines carry the launcher's process id:
+#
+#      # safer-agents: session placeholders (removed at exit) -- begin pid=48213
+#      /web/modules/custom/mymod/.envrc
+#      # safer-agents: session placeholders -- end pid=48213
+#
+#  Each run removes only its own block at exit, and at launch removes only
+#  the blocks whose run is no longer alive (session_is_live, section 7c).
+#  Before this, a launch removed whatever block it found, so a second session
+#  in the same repository un-hid the first one's placeholders, and the first
+#  one's exit un-hid the second's. A block without a pid comes from a launcher
+#  older than this rule, and is treated as stale.
+#
 #  The exit report is not weakened either way: it scans with `find`, not git.
 # ---------------------------------------------------------------------------
 EXCLUDE_BEGIN="# safer-agents: session placeholders (removed at exit) -- begin"
 EXCLUDE_END="# safer-agents: session placeholders -- end"
+
+# The marker line for one run.  $1  begin|end    $2  the process id, or ""
+# for the old, unlabelled form.
+exclude_marker() {
+    local base="$EXCLUDE_END"
+    [[ "$1" == "begin" ]] && base="$EXCLUDE_BEGIN"
+    if [[ -n "${2:-}" ]]; then
+        echo "$base pid=$2"
+    else
+        echo "$base"
+    fi
+}
 
 hide_placeholders_from_git() {
     local top path
@@ -1128,8 +1155,13 @@ hide_placeholders_from_git() {
 
     # Heal first, write second. A stale block from a killed run must go even
     # when THIS run has no placeholders to hide — that is why this function
-    # is called unconditionally.
-    remove_exclude_block
+    # is called unconditionally. A block that belongs to a LIVE run in the
+    # same repository is left alone: it is the other session's.
+    remove_stale_exclude_blocks
+    # Process ids are reused after a reboot. If a dead run left a block with
+    # OUR id, session_is_live would call it alive because we are. Remove it
+    # by id as well, so the file never holds two blocks with the same id.
+    remove_exclude_block "$EXCLUDE_FILE" "$$"
 
     if [[ ${#PREEMPTED_FILES[@]} -eq 0 ]]; then
         return 0
@@ -1138,14 +1170,14 @@ hide_placeholders_from_git() {
     mkdir -p "$(dirname "$EXCLUDE_FILE")"
 
     {
-        echo "$EXCLUDE_BEGIN"
+        exclude_marker begin "$$"
         for path in ${PREEMPTED_FILES+"${PREEMPTED_FILES[@]}"}; do
             # Only paths inside THIS repository. A placeholder in a --rw
             # folder that is its own repository stays visible there.
             [[ "$path" == "$top"/* ]] || continue
             echo "/${path#"$top"/}"
         done
-        echo "$EXCLUDE_END"
+        exclude_marker end "$$"
     } >> "$EXCLUDE_FILE"
 
     echo "              The empty files are hidden from \`git status\` until then,"
@@ -1163,16 +1195,23 @@ hide_placeholders_from_git() {
 #  $1  the exclude file to clean. Defaults to this run's EXCLUDE_FILE. The
 #      argument exists for `--repair`, which cleans files that belong to OTHER
 #      runs and must not disturb this run's own state.
+#  $2  the process id whose block to remove. Defaults to this run's own id.
+#      An empty string, passed on purpose, removes the unlabelled block of an
+#      older launcher. Only that one block is touched: another session's
+#      block in the same file is left as it is.
 # ---------------------------------------------------------------------------
 remove_exclude_block() {
     local file="${1:-$EXCLUDE_FILE}"
-    local tmp
+    local pid="${2-$$}"
+    local tmp begin end
 
     [[ -n "$file" && -f "$file" ]] || return 0
-    grep -qF "$EXCLUDE_BEGIN" "$file" || return 0
+    begin="$(exclude_marker begin "$pid")"
+    end="$(exclude_marker end "$pid")"
+    grep -qxF "$begin" "$file" || return 0
 
     tmp="$file.safer-agents.$$"
-    if ! awk -v b="$EXCLUDE_BEGIN" -v e="$EXCLUDE_END" '
+    if ! awk -v b="$begin" -v e="$end" '
             $0 == b { skip = 1; next }
             $0 == e { skip = 0; next }
             !skip
@@ -1181,6 +1220,35 @@ remove_exclude_block() {
         return 0
     fi
     mv "$tmp" "$file"
+}
+
+# ---------------------------------------------------------------------------
+#  Remove every block whose run is dead. Called at launch.
+#
+#  A block is dead when its pid is not a live safer-* process, and always
+#  when it has no pid at all (the old form). A live block belongs to another
+#  session in the same repository and is kept.
+#
+#  $1  the exclude file. Defaults to this run's EXCLUDE_FILE.
+# ---------------------------------------------------------------------------
+remove_stale_exclude_blocks() {
+    local file="${1:-$EXCLUDE_FILE}"
+    local line pid
+
+    [[ -n "$file" && -f "$file" ]] || return 0
+    grep -qF "$EXCLUDE_BEGIN" "$file" || return 0
+
+    # Read the begin lines first, then edit. Editing while reading the same
+    # file would race with the `mv` inside remove_exclude_block.
+    while IFS= read -r line; do
+        if [[ "$line" == "$EXCLUDE_BEGIN" ]]; then
+            remove_exclude_block "$file" ""
+        elif [[ "$line" == "$EXCLUDE_BEGIN pid="* ]]; then
+            pid="${line#"$EXCLUDE_BEGIN pid="}"
+            session_is_live "$pid" && continue
+            remove_exclude_block "$file" "$pid"
+        fi
+    done < <(grep -F "$EXCLUDE_BEGIN" "$file")
 }
 
 
@@ -1358,8 +1426,10 @@ write_session_record() {
         echo "#                               process is still running is skipped"
         echo "#   exclude <file>              .git/info/exclude of the project, holding"
         echo "#                               a block between these two marker lines:"
-        echo "#                                 $EXCLUDE_BEGIN"
-        echo "#                                 $EXCLUDE_END"
+        echo "#                                 $(exclude_marker begin "$$")"
+        echo "#                                 $(exclude_marker end "$$")"
+        echo "#                               Only that block is this run's. Another"
+        echo "#                               session in the same repository has its own."
         echo "#   placeholder file <path>     an empty file Docker created as a mount"
         echo "#   placeholder dir <path>      point. Deleted by --repair if still empty"
         echo ""
@@ -1496,9 +1566,14 @@ repair_stale_sessions() {
         echo "  run:     safer-$tool started $started in $project"
         echo "  removed: $removed empty placeholders, kept $kept"
 
+        # Only the block with THIS record's pid. Another session may be live
+        # in the same repository, and its block must stay. A record older
+        # than the pid markers wrote an unlabelled block; try that form too.
         if [[ -n "$exclude" && -f "$exclude" ]] \
-           && grep -qF "$EXCLUDE_BEGIN" "$exclude"; then
-            remove_exclude_block "$exclude"
+           && { grep -qxF "$(exclude_marker begin "$pid")" "$exclude" \
+                || grep -qxF "$EXCLUDE_BEGIN" "$exclude"; }; then
+            remove_exclude_block "$exclude" "$pid"
+            remove_exclude_block "$exclude" ""
             echo "  cleaned: ignore rules removed from $exclude"
         fi
 

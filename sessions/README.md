@@ -20,7 +20,9 @@ cleanup normally removes:
    needs something to mount on, so it creates that path in your project.
 2. The **exclude file**, `.git/info/exclude` of the project, where the run
    wrote a block of ignore rules between two marker lines. The block hides
-   the placeholders from `git status` during the session.
+   the placeholders from `git status` during the session. The marker lines
+   carry the run's process id, so two sessions in two modules of the same
+   repository each have their own block and never remove each other's.
 
 The file starts with comments that explain the same thing. Below them, one
 fact per line: a keyword, then its value.
