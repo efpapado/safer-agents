@@ -62,9 +62,10 @@
 #
 #      Extra folders given with --add are mounted READ-ONLY, and so are the
 #      Drupal folders chosen by name with --with-core, --with-modules,
-#      --with-contrib and --with-vendor (section 8b). Only the project
-#      folder, and anything given with --rw, can be written at all. --rw on a
-#      folder outside the project asks you to confirm it first; see section 8.
+#      --with-contrib, --with-vendor and --with-config (section 8b). Only the
+#      project folder, and anything given with --rw or a --with-*-rw flag, can
+#      be written at all. A writable folder outside the project asks you to
+#      confirm it first; see section 8.
 #
 #  (c) The agent sending data out, or fetching instructions in. Handled by the
 #      network section: the container is put on a sealed network and may only
@@ -2015,12 +2016,16 @@ add_mount() {
 #      --with-contrib    <web root>/modules/contrib
 #      --with-vendor     the composer vendor folder
 #      --with-config     the config export folder, read from settings.php
-#      --with-config-rw  the same folder, READ-WRITE
+#      --with-all        core, modules, vendor and config in one flag
 #
 #  They are the same as --add: READ-ONLY, at the same path in the container as
 #  on your Mac, and covered by section 7 like every other mount. The only new
-#  part is how the path is found. --with-config-rw is the one exception: it is
-#  the same as --rw on that folder, with the same confirmation.
+#  part is how the path is found.
+#
+#  Every flag has a -rw form: --with-core-rw, --with-config-rw, --with-all-rw
+#  and so on. The -rw form is the same as --rw on that folder, with the same
+#  confirmation, one folder at a time. --with-config-rw is the everyday case:
+#  the agent runs a config export inside the sandbox.
 #
 #  HOW THE PATH IS FOUND
 #  The flags cannot be a fixed `../../../core`, because you may run the
@@ -2347,21 +2352,32 @@ config_mount_target() {
 }
 
 # ---------------------------------------------------------------------------
-#  Mount one named Drupal folder read-only.
+#  Mount one named Drupal folder, or all of them.
 #
-#  $1  core | modules | contrib | vendor | config | config-rw
-#  $2  the flag as typed, for messages
+#  $1  ro | rw
+#  $2  core | modules | contrib | vendor | config | all
+#  $3  the flag as typed, for messages
 #
-#  config-rw is the one case that mounts read-write. It goes through the same
-#  confirmation as --rw, because the folder is outside your project.
+#  rw goes through the same confirmation as --rw, once per folder, because
+#  the folders are outside your project. `all` is core, modules, vendor and
+#  config, each mounted as if its own flag had been typed. contrib is not in
+#  the list: it is already inside modules.
 # ---------------------------------------------------------------------------
 add_drupal_mount() {
-    local what="$1"
-    local flag="$2"
+    local mode="$1"
+    local what="$2"
+    local flag="$3"
     local target
-    local mode=ro
 
     locate_drupal
+
+    if [[ "$what" == "all" ]]; then
+        local one
+        for one in core modules vendor config; do
+            add_drupal_mount "$mode" "$one" "$flag"
+        done
+        return 0
+    fi
 
     case "$what" in
         core)    target="$DRUPAL_WEB/core" ;;
@@ -2370,11 +2386,6 @@ add_drupal_mount() {
         config)
             locate_config_sync "$flag"
             target="$(config_mount_target)"
-            ;;
-        config-rw)
-            locate_config_sync "$flag"
-            target="$(config_mount_target)"
-            mode=rw
             ;;
         vendor)
             if [[ -z "$DRUPAL_VENDOR" ]]; then
@@ -3342,10 +3353,16 @@ parse_common_arg() {
             ARGS_CONSUMED=2
             ;;
 
-        # Mount one of the Drupal folders READ-ONLY, found by name from the
-        # repository root. See section 8b.
-        --with-core|--with-modules|--with-contrib|--with-vendor|--with-config|--with-config-rw)
-            add_drupal_mount "${1#--with-}" "$1"
+        # Mount one of the Drupal folders, found by name from the repository
+        # root. READ-ONLY unless the flag ends in -rw. --with-all names the
+        # four everyday folders at once. See section 8b.
+        --with-core|--with-modules|--with-contrib|--with-vendor|--with-config|--with-all)
+            add_drupal_mount ro "${1#--with-}" "$1"
+            ARGS_CONSUMED=1
+            ;;
+        --with-core-rw|--with-modules-rw|--with-contrib-rw|--with-vendor-rw|--with-config-rw|--with-all-rw)
+            local what="${1#--with-}"
+            add_drupal_mount rw "${what%-rw}" "$1"
             ARGS_CONSUMED=1
             ;;
 

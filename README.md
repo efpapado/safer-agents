@@ -32,8 +32,9 @@ database driver. The intended shape of a session is one module:
 2. Add what the agent must READ: Drupal core, a contrib module, another
    custom module, a theme, the vendor tree. Use `--with-core`, `--with-modules`,
    `--with-contrib`, `--with-vendor` and `--with-config` for the standard
-   folders, and `--add`
-   for anything else. Those mounts are read-only.
+   folders, `--with-all` for the four everyday ones at once, and `--add`
+   for anything else. Those mounts are read-only. Add `-rw` to a `--with`
+   flag to make that folder writable.
 3. Everything else on your Mac stays closed. The site root, `settings.php`, the
    files directory and your database are not reachable.
 
@@ -205,6 +206,8 @@ their own. Anything else takes `--add` with a path relative to the module:
 | A custom theme | `--add ../../../themes/custom/my_theme` |
 | The vendor tree | `--with-vendor` (or `--add ../../../../vendor`) |
 | The config export | `--with-config`, or `--with-config-rw` to let the agent export config |
+| Core, modules, vendor and config together | `--with-all`, or `--with-all-rw` to make them all writable |
+| Any of the above, writable | Add `-rw` to the flag: `--with-modules-rw`, `--with-vendor-rw` |
 
 ### How the `--with-*` flags find the folders
 
@@ -258,6 +261,12 @@ Read-only: /Users/you/projects/my-site/config   (--with-config)
 config export inside the sandbox. It is `--rw` on that folder, with the same
 confirmation: the folder is outside your module, so you type `yes` once.
 
+Every `--with` flag has a `-rw` form that works the same way: `--with-core-rw`,
+`--with-modules-rw`, `--with-contrib-rw`, `--with-vendor-rw` and
+`--with-all-rw`. Each folder is confirmed on its own, so `--with-all-rw` asks
+up to four times. Use the `-rw` forms only when the agent must change those
+folders. Core and vendor are managed by composer, so they rarely qualify.
+
 When nothing is found the command stops and tells you. `--add PATH` always
 works as a fallback. Each flag prints the folder it resolved to at launch, so
 you can see what the agent got:
@@ -308,14 +317,14 @@ Unit tests only. Anything that boots Drupal needs the database.
 
 ```
 safer-claude   [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
-               [--with-config] [--with-config-rw]
+               [--with-config] [--with-all] [--with-*-rw]
                [--rw PATH] [--allow HOST] [--effort LEVEL] [--offline] [-- COMMAND ...]
 safer-codex    [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
-               [--with-config] [--with-config-rw]
+               [--with-config] [--with-all] [--with-*-rw]
                [--rw PATH] [--allow HOST] [--offline] [-- COMMAND ...]
 safer-codex    --history | --merge-history
 safer-opencode [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
-               [--with-config] [--with-config-rw]
+               [--with-config] [--with-all] [--with-*-rw]
                [--rw PATH] [--allow HOST] [--ollama] [--offline] [-- COMMAND ...]
 ```
 
@@ -327,7 +336,8 @@ safer-opencode [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--w
 | `--with-contrib` | Mount `<web root>/modules/contrib` read-only. |
 | `--with-vendor` | Mount the composer vendor folder read-only. |
 | `--with-config` | Mount the config export folder read-only. Its place is read from `sites/default/settings.php` on your Mac. The parent of the `sync` folder is mounted, so `config_split` folders come along. |
-| `--with-config-rw` | The same folder **read-write**, so the agent can export config. Confirmed like `--rw`. |
+| `--with-all` | `--with-core`, `--with-modules`, `--with-vendor` and `--with-config` in one flag. Contrib is left out because it is already inside modules. |
+| `--with-*-rw` | Any `--with` flag with `-rw` added mounts that folder **read-write**: `--with-config-rw` lets the agent export config, `--with-all-rw` makes all four folders writable. Each folder is confirmed like `--rw`. |
 | `--rw PATH` | Mount another folder **read-write**. The agent can change your Mac through it. Use it only for a second custom module you are really editing. A folder outside your project must be confirmed by typing `yes`. |
 | `--allow HOST` | Allow one more destination, for this run only. |
 | `--offline` | No network at all. The strongest mode, and the right one for a read-only analysis pass. |
@@ -361,6 +371,12 @@ safer-claude --with-core --add ../../contrib/webform --with-vendor
 
 # The whole site as reference: core, every module, and vendor.
 safer-claude --with-core --with-modules --with-vendor
+
+# The same plus the config export, in one flag.
+safer-claude --with-all
+
+# Config work: the agent exports config into the sync folder.
+safer-claude --with-core --with-config-rw
 
 # Two custom modules that share a service. The second one is editable too.
 safer-claude --with-core --rw ../my_other_module

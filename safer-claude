@@ -21,8 +21,10 @@
 #      --with-modules  repository root: <web root>/core, <web root>/modules,
 #      --with-contrib  <web root>/modules/contrib, or the composer vendor
 #      --with-vendor   folder. See section 8b of lib/safer-common.sh
-#      --with-config     the config export folder, read from settings.php
-#      --with-config-rw  the same, read-write
+#      --with-config   the config export folder, read from settings.php
+#      --with-all      core, modules, vendor and config in one flag
+#      --with-*-rw     any of the above read-WRITE, for example
+#                      --with-config-rw or --with-all-rw. Confirmed like --rw
 #      --rw PATH       mount a host folder read-WRITE. The agent can change
 #                      your Mac through it, so a folder outside the current
 #                      directory has to be confirmed
@@ -93,7 +95,7 @@ source "$SAFER_ROOT/lib/safer-common.sh"
 usage() {
     echo "Usage: safer-claude [--add PATH] [--with-core] [--with-modules]"
     echo "                    [--with-contrib] [--with-vendor] [--with-config]"
-    echo "                    [--with-config-rw] [--rw PATH] [--allow HOST]"
+    echo "                    [--with-all] [--with-*-rw] [--rw PATH] [--allow HOST]"
     echo "                    [--effort LEVEL] [--offline] [-- COMMAND ...]"
     echo "       safer-claude --repair"
     echo ""
@@ -106,7 +108,10 @@ usage() {
     echo "                  is read from sites/default/settings.php on your Mac;"
     echo "                  the parent of the sync folder is mounted, so config"
     echo "                  split folders come along"
-    echo "  --with-config-rw  the same folder read-WRITE, for config export"
+    echo "  --with-all      core, modules, vendor and config in one flag"
+    echo "  --with-*-rw     any --with flag read-WRITE: --with-config-rw for a"
+    echo "                  config export, --with-all-rw for everything. Each"
+    echo "                  folder is confirmed like --rw"
     echo "  --rw PATH       mount a folder read-WRITE. The agent can change"
     echo "                  your Mac through it, so ask for it by name. A"
     echo "                  folder outside your project must be confirmed."
