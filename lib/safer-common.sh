@@ -1,22 +1,23 @@
 # =============================================================================
-#  lib/safer-common.sh — the sandbox machinery, shared by all three commands
+#  lib/safer-common.sh — the sandbox machinery, shared by all four commands
 # =============================================================================
 #
 #  WHAT THIS FILE IS
-#  There are three commands next to this folder: safer-claude, safer-codex and
-#  safer-opencode. Each one knows about its own tool: where that tool keeps its
+#  There are four commands next to this folder: safer-claude, safer-codex,
+#  safer-opencode and safer-copilot. Each one knows about its own tool: where
+#  that tool keeps its
 #  settings, which files of its own can run code on your Mac, which flags it
 #  accepts, which image it runs.
 #
-#  Everything else is the same for all three — the sealed network, the
+#  Everything else is the same for all four — the sealed network, the
 #  gatekeeper, hiding .git directories, covering the paths in
 #  dangerous-paths.txt, checking mount paths, writing the connection log. That
 #  is what lives here.
 #
 #  WHY SHARED RATHER THAN COPIED
 #  This is the security-critical half. A mistake in here is a hole in the
-#  sandbox. Three copies of it would mean fixing every such mistake three times
-#  and eventually missing one. One copy means a fix lands in all three commands
+#  sandbox. Four copies of it would mean fixing every such mistake four times
+#  and eventually missing one. One copy means a fix lands in all four commands
 #  at once.
 #
 #  HOW A COMMAND USES IT
@@ -62,7 +63,8 @@
 #
 #      Extra folders given with --add are mounted READ-ONLY, and so are the
 #      Drupal folders chosen by name with --with-core, --with-modules,
-#      --with-contrib, --with-vendor and --with-config (section 8b). Only the
+#      --with-themes, --with-contrib, --with-vendor and --with-config
+#      (section 8b). Only the
 #      project folder, and anything given with --rw or a --with-*-rw flag, can
 #      be written at all. A writable folder outside the project asks you to
 #      confirm it first; see section 8.
@@ -74,9 +76,10 @@
 #  ---------------------------------------------------------------------------
 #  FOLDER LAYOUT
 #  ---------------------------------------------------------------------------
-#      safer-claude                 the three commands
+#      safer-claude                 the four commands
 #      safer-codex
 #      safer-opencode
+#      safer-copilot
 #      lib/safer-common.sh          this file
 #
 #      dangerous-paths.txt          paths the agent may not write   <- edit this
@@ -84,6 +87,7 @@
 #      docker/Dockerfile.claude     one agent image per tool
 #      docker/Dockerfile.codex
 #      docker/Dockerfile.opencode
+#      docker/Dockerfile.copilot
 #      docker/Dockerfile.proxy      the gatekeeper's image  (shared)
 #      docker/Dockerfile.forwarder  the Ollama forwarder    (opencode only)
 #
@@ -96,6 +100,7 @@
 #      proxy/allowlist-claude.txt   destinations for one tool   <- and these
 #      proxy/allowlist-codex.txt
 #      proxy/allowlist-opencode.txt
+#      proxy/allowlist-copilot.txt
 #
 #      connection_logs/             one file per run, named claude-<time>.log
 #      sessions/                    one record per RUNNING run; a leftover one
@@ -139,7 +144,7 @@
 # ---------------------------------------------------------------------------
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "This is a library, not a command." >&2
-    echo "Run safer-claude, safer-codex or safer-opencode instead." >&2
+    echo "Run safer-claude, safer-codex, safer-opencode or safer-copilot instead." >&2
     exit 1
 fi
 
@@ -169,10 +174,12 @@ SESSIONS_DIR="$SAFER_ROOT/sessions"
 #  Where session history lives when a tool cannot keep it per project itself.
 #
 #  Claude Code sorts transcripts by project on its own, so safer-claude binds
-#  back one folder of ~/.claude/projects. Codex keeps every project's sessions
-#  in one pile, so safer-codex gives each module its own pile here:
+#  back one folder of ~/.claude/projects. Codex and Copilot CLI keep every
+#  project's sessions in one pile, so safer-codex and safer-copilot give each
+#  module its own pile here:
 #
 #      history/codex/<module slug>/sessions/
+#      history/copilot/<module slug>/session-state/
 #
 #  Kept in this folder, not in ~/.codex and not in the module, for three
 #  reasons. It is already a protected root, so --add, --rw and the working
@@ -192,8 +199,9 @@ PROXY_CONF="$PROXY_DIR/tinyproxy.conf"
 #    allowlist-<tool>.txt   destinations only this tool needs, which is mostly
 #                           its own model API and its own login service
 #
-#  Splitting them this way means claude cannot reach OpenAI's servers and codex
-#  cannot reach Anthropic's. Nothing depends on that, but a narrower list is a
+#  Splitting them this way means claude cannot reach OpenAI's servers, codex
+#  cannot reach Anthropic's, and only copilot can reach GitHub's. Nothing
+#  depends on that, but a narrower list is a
 #  better list, and an unexpected entry in a connection log is easier to notice.
 # ---------------------------------------------------------------------------
 ALLOWLIST_COMMON="$PROXY_DIR/allowlist-common.txt"
@@ -202,7 +210,7 @@ ALLOWLIST_TOOL="$PROXY_DIR/allowlist-$TOOL.txt"
 # ---------------------------------------------------------------------------
 #  The list of paths inside a code tree that must not be writable — git hook
 #  folders, .envrc, editor task files, project-level agent settings. Read at
-#  launch and applied to every mounted folder. Shared by all three commands;
+#  launch and applied to every mounted folder. Shared by all four commands;
 #  the file itself explains the format and the two ways it can be defeated.
 # ---------------------------------------------------------------------------
 DANGEROUS_PATHS="$SAFER_ROOT/dangerous-paths.txt"
@@ -232,7 +240,7 @@ DOCKER_DIR="$SAFER_ROOT/docker"
 # ---------------------------------------------------------------------------
 
 # Name of the gatekeeper image, built from docker/Dockerfile.proxy. Shared by all
-# three commands: it contains no tool-specific anything.
+# four commands: it contains no tool-specific anything.
 PROXY_IMAGE="safer-gatekeeper"
 
 # Port the gatekeeper listens on, inside the Docker network only. Never exposed
@@ -2013,10 +2021,11 @@ add_mount() {
 #
 #      --with-core       <web root>/core
 #      --with-modules    <web root>/modules
+#      --with-themes     <web root>/themes
 #      --with-contrib    <web root>/modules/contrib
 #      --with-vendor     the composer vendor folder
 #      --with-config     the config export folder, read from settings.php
-#      --with-all        core, modules, vendor and config in one flag
+#      --with-all        core, modules, themes, vendor and config in one flag
 #
 #  They are the same as --add: READ-ONLY, at the same path in the container as
 #  on your Mac, and covered by section 7 like every other mount. The only new
@@ -2355,13 +2364,13 @@ config_mount_target() {
 #  Mount one named Drupal folder, or all of them.
 #
 #  $1  ro | rw
-#  $2  core | modules | contrib | vendor | config | all
+#  $2  core | modules | themes | contrib | vendor | config | all
 #  $3  the flag as typed, for messages
 #
 #  rw goes through the same confirmation as --rw, once per folder, because
-#  the folders are outside your project. `all` is core, modules, vendor and
-#  config, each mounted as if its own flag had been typed. contrib is not in
-#  the list: it is already inside modules.
+#  the folders are outside your project. `all` is core, modules, themes,
+#  vendor and config, each mounted as if its own flag had been typed.
+#  contrib is not in the list: it is already inside modules.
 # ---------------------------------------------------------------------------
 add_drupal_mount() {
     local mode="$1"
@@ -2373,7 +2382,12 @@ add_drupal_mount() {
 
     if [[ "$what" == "all" ]]; then
         local one
-        for one in core modules vendor config; do
+        for one in core modules themes vendor config; do
+            # A site can lack <web root>/themes, and that is normal. `all`
+            # skips it then. --with-themes alone still reports the error.
+            if [[ "$one" == "themes" && ! -d "$DRUPAL_WEB/themes" ]]; then
+                continue
+            fi
             add_drupal_mount "$mode" "$one" "$flag"
         done
         return 0
@@ -2382,6 +2396,7 @@ add_drupal_mount() {
     case "$what" in
         core)    target="$DRUPAL_WEB/core" ;;
         modules) target="$DRUPAL_WEB/modules" ;;
+        themes)  target="$DRUPAL_WEB/themes" ;;
         contrib) target="$DRUPAL_WEB/modules/contrib" ;;
         config)
             locate_config_sync "$flag"
@@ -2413,7 +2428,7 @@ add_drupal_mount() {
 #
 #  THE CONFIG STRATEGY, AND WHY IT IS THIS ONE
 #
-#  All three tools keep their settings in a folder in your home directory. The
+#  All four tools keep their settings in a folder in your home directory. The
 #  obvious approach is to mount that folder read-write and pin the dangerous
 #  files read-only on top. That approach is not used here, because it has two
 #  problems.
@@ -2455,8 +2470,8 @@ add_drupal_mount() {
 #  which is not something a sandbox limited to one project should be able to
 #  read. They are per-session and disappear on exit, with two exceptions that
 #  each cover ONE project: claude binds back this project's transcript folder
-#  (see safer-claude), and codex binds back a per-module store kept under
-#  $HISTORY_DIR (see rw_store below and safer-codex).
+#  (see safer-claude), and codex and copilot bind back a per-module store kept
+#  under $HISTORY_DIR (see rw_store below, safer-codex and safer-copilot).
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -2817,8 +2832,8 @@ rw_back() {
 # ---------------------------------------------------------------------------
 #  The folder name Claude Code uses for one project under ~/.claude/projects:
 #  the full path with every character that is not a letter or digit replaced
-#  by a dash. safer-codex uses the same name under $HISTORY_DIR, so the two
-#  tools' history folders for one module read the same.
+#  by a dash. safer-codex and safer-copilot use the same name under
+#  $HISTORY_DIR, so the tools' history folders for one module read the same.
 # ---------------------------------------------------------------------------
 project_slug() {
     printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'
@@ -3152,7 +3167,7 @@ safer_setup_network() {
 #
 #  Called from cleanup(), before the gatekeeper container is destroyed.
 #
-#  The file is named <tool>-<timestamp>.log, so the three commands' logs sit
+#  The file is named <tool>-<timestamp>.log, so the four commands' logs sit
 #  side by side and are still easy to tell apart and to filter:
 #
 #      ls connection_logs/opencode-*
@@ -3279,7 +3294,7 @@ save_connection_log() {
         echo ""
         echo "To allow one of these permanently, add an anchored pattern to:"
         echo "  $ALLOWLIST_TOOL          (only safer-$TOOL)"
-        echo "  $ALLOWLIST_COMMON  (all three commands)"
+        echo "  $ALLOWLIST_COMMON  (all four commands)"
         echo "or try it for a single run with:  safer-$TOOL --allow HOST"
     else
         echo "No blocked connections this run."
@@ -3355,12 +3370,12 @@ parse_common_arg() {
 
         # Mount one of the Drupal folders, found by name from the repository
         # root. READ-ONLY unless the flag ends in -rw. --with-all names the
-        # four everyday folders at once. See section 8b.
-        --with-core|--with-modules|--with-contrib|--with-vendor|--with-config|--with-all)
+        # five everyday folders at once. See section 8b.
+        --with-core|--with-modules|--with-themes|--with-contrib|--with-vendor|--with-config|--with-all)
             add_drupal_mount ro "${1#--with-}" "$1"
             ARGS_CONSUMED=1
             ;;
-        --with-core-rw|--with-modules-rw|--with-contrib-rw|--with-vendor-rw|--with-config-rw|--with-all-rw)
+        --with-core-rw|--with-modules-rw|--with-themes-rw|--with-contrib-rw|--with-vendor-rw|--with-config-rw|--with-all-rw)
             local what="${1#--with-}"
             add_drupal_mount rw "${what%-rw}" "$1"
             ARGS_CONSUMED=1

@@ -14,7 +14,7 @@
 #  Every path listed here is covered by a mount, so the agent cannot write it.
 #
 #  WHY A LIST AND NOT A RULE
-#  The config folders of the three tools are handled the other way round: the
+#  The config folders of the four tools are handled the other way round: the
 #  container gets a throwaway COPY, and only what must be shared is bound back.
 #  That is a default-deny design and it is much better than a list. See
 #  SECTION 9 of lib/safer-common.sh for why.
@@ -159,8 +159,8 @@
 #  A policy, not a control. These scripts do not enforce it:
 #
 #      The tools are never run natively in a real project folder. On the Mac,
-#      claude, codex and opencode are started only in empty folders, and only
-#      to change settings or update hooks. Developers are warned and are
+#      claude, codex, opencode and copilot are started only in empty folders,
+#      and only to change settings or update hooks. Developers are warned and are
 #      responsible for keeping to it.
 #
 #  This matters because every entry here is defined by its TRIGGER — the thing
@@ -384,13 +384,17 @@ pin    file   Jenkinsfile
 # -----------------------------------------------------------------------------
 #  Agent control planes
 # -----------------------------------------------------------------------------
-#  Project-level settings for the three tools. Hooks and MCP server entries in
+#  Project-level settings for the four tools. Hooks and MCP server entries in
 #  these start processes. Inside the container that is contained — but the next
 #  time you run the tool on your Mac in this folder, it is not.
 #
 #  Pinned rather than hidden: a project's own commands, agents and skills are
 #  useful, and the agent should be able to read them.
+#
+#  .mcp.json is read by Claude Code and by Copilot CLI, which also reads
+#  .github/mcp.json. A "local" server entry is a command line the tool runs.
 pin    file   .mcp.json
+pin    file   .github/mcp.json
 # ---------------------------------------------------------------------------
 #  THE AGENT CONTROL PLANES — narrow, not whole
 #
@@ -434,6 +438,34 @@ pin    nested .claude/plugins
 pin    dir    .codex
 pin    file   opencode.json
 pin    file   opencode.jsonc
+
+#  Copilot CLI keeps its project-level control plane under .github/, next to
+#  the workflows. All of it is loaded after you trust the folder, which the
+#  sandbox does for you (see write_config_json in safer-copilot), so inside
+#  the container these run — contained. On your Mac they run at the next
+#  native start in this folder.
+#
+#    .github/hooks/*.json     shell commands at session start, before and
+#                             after every tool call, at session end
+#    .github/copilot/         repo settings. settings.json there can carry
+#                             statusLine.command, a shell command, and the
+#                             CLI writes settings.local.json next to it on
+#                             `/settings --local`. Pinned whole: that one
+#                             command fails inside the sandbox, which is the
+#                             price of not leaving a shell command writable
+#    .github/extensions/      JavaScript the CLI loads into itself
+#    .github/plugin/          a plugin bundled with the repository: skills,
+#                             agents, hooks and MCP servers in one
+#    .github/lsp.json         language servers, which are processes
+#
+#  Not here: .github/skills, .github/agents, .github/instructions and
+#  .github/copilot-instructions.md. Those are prompts, like CLAUDE.md — see
+#  the "deliberately not here" section above.
+pin    dir    .github/hooks
+pin    dir    .github/copilot
+pin    dir    .github/extensions
+pin    dir    .github/plugin
+pin    file   .github/lsp.json
 
 
 # #############################################################################

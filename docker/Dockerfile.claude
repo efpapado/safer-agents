@@ -15,13 +15,14 @@
 #                         Nothing here is COPYed, so the context exists only to
 #                         be small. Keep it that way
 #
-#  WHY THERE ARE THREE OF THESE FILES
+#  WHY THERE ARE FOUR OF THESE FILES
 #  One per tool, all in this docker/ folder: Dockerfile.claude,
-#  Dockerfile.codex, Dockerfile.opencode. They
-#  are nearly identical, differing only in the npm package installed at the end.
-#  A single file with an "if" in it would be shorter, but this way each image is
-#  described by a file you can read start to finish without deciding which
-#  branch applies to you.
+#  Dockerfile.codex, Dockerfile.opencode and Dockerfile.copilot. The first
+#  three are nearly identical, differing only in the npm package installed at
+#  the end. Dockerfile.copilot installs a native executable instead and has no
+#  Node.js; it says why. A single file with an "if" in it would be shorter, but
+#  this way each image is described by a file you can read start to finish
+#  without deciding which branch applies to you.
 #
 #  WHAT IS DELIBERATELY MISSING
 #  - git      — version control happens on the host, by hand. See below.

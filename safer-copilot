@@ -1,0 +1,570 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  safer-copilot — run GitHub Copilot CLI in a locked-down container
+# =============================================================================
+#
+#  USAGE
+#      safer-copilot
+#      safer-copilot --ro ../../../core --ro ../../../../vendor
+#      safer-copilot --with-core --with-vendor
+#      safer-copilot --rw ../../contrib
+#      safer-copilot --allow www.php.net
+#      safer-copilot --offline
+#      safer-copilot --repair
+#      safer-copilot -- bash
+#
+#  FLAGS
+#      --add PATH      mount a host folder READ-ONLY, in addition to the
+#                      current directory. --ro means the same thing
+#      --with-core     mount a Drupal folder READ-ONLY, found by name from the
+#      --with-modules  repository root: <web root>/core, <web root>/modules,
+#      --with-themes   <web root>/themes, <web root>/modules/contrib, or the
+#      --with-contrib  composer vendor folder. See section 8b of
+#      --with-vendor   lib/safer-common.sh
+#      --with-config   the config export folder, read from settings.php
+#      --with-all      core, modules, themes, vendor and config in one flag
+#      --with-*-rw     any of the above read-WRITE, for example
+#                      --with-config-rw or --with-all-rw. Confirmed like --rw
+#      --rw PATH       mount a host folder read-WRITE. The agent can change
+#                      your Mac through it, so a folder outside the current
+#                      directory has to be confirmed
+#      --allow HOST    permit one extra network destination for this run only
+#      --offline       no network at all (the agent cannot reach the model API,
+#                      so this is only useful with `-- bash` for local analysis)
+#      --repair        finish the cleanup of a run that died without its exit
+#                      trap (kill -9, power loss), then stop. No container.
+#                      See sessions/README.md
+#      -- COMMAND      run COMMAND instead of copilot
+#
+#      --history       list the saved sandbox sessions, per module, and stop.
+#                      Runs on your Mac; no container is started
+#
+#  There is no --effort here: Copilot has --reasoning-effort of its own, and
+#  anything you type that is not a flag above is passed through to it, so
+#  `safer-copilot --reasoning-effort high` works. There is no --ollama either:
+#  that belongs to safer-opencode.
+#
+#  WHERE THE REST OF THE LOGIC IS
+#  The sandbox itself — the sealed network, the gatekeeper, hiding .git, the
+#  connection log — is in lib/safer-common.sh, shared with safer-claude,
+#  safer-codex and safer-opencode. This file holds only what is specific to
+#  Copilot CLI.
+#
+#  ---------------------------------------------------------------------------
+#  WHAT COPILOT CLI IS, ON DISK
+#  ---------------------------------------------------------------------------
+#  Homebrew installs it as a CASK, not a formula: `brew install --cask
+#  copilot-cli` downloads one native executable from the GitHub release and
+#  links it as /opt/homebrew/bin/copilot. There is no Node.js dependency; Node
+#  is built into the executable. On first start it unpacks its own package
+#  into ~/Library/Caches/copilot/pkg and runs from there.
+#
+#  Everything else lives in ONE folder, ~/.copilot:
+#
+#      settings.json              your settings. Holds statusLine.command, a
+#                                 shell command the CLI runs on your Mac
+#      config.json                "managed automatically": logged-in users,
+#                                 trusted folders, first-launch date — and
+#                                 the login token in plain text, if you ever
+#                                 told the CLI to store it outside the
+#                                 Keychain. User settings do not go here
+#      mcp-config.json            MCP servers, which start processes
+#      lsp-config.json            language servers, which start processes
+#      permissions-config.json    your saved "always allow" answers
+#      providers.json             API keys for a custom model provider
+#      hooks/*.json               your own hooks: shell commands the CLI
+#                                 runs at session start, before a tool, ...
+#      session-state/<uuid>/      one folder per session, every project in
+#                                 one pile. What --resume reads
+#      session-store.db           an index over those; rebuilt on demand
+#      command-history-state.json the up-arrow prompt history, every project
+#      logs/                      one log per process
+#      installed-plugins/         plugins: skills, agents, hooks, MCP servers
+#      skills/ agents/ instructions/ extensions/ copilot-instructions.md
+#
+#  The cask also auto-updates: the running CLI checks api.github.com for a
+#  newer release, downloads it into the cache, and runs THAT at the next
+#  launch. So `copilot --version` on your Mac may be newer than what Homebrew
+#  thinks it installed. The launcher reads the number the executable prints,
+#  which is the one that actually runs, and builds the image from that tag.
+#
+#  ---------------------------------------------------------------------------
+#  SETTINGS INSIDE THE SANDBOX
+#  ---------------------------------------------------------------------------
+#  Settings changed in the sandbox apply for the session and are then thrown
+#  away. Your Mac's ~/.copilot is never modified. See the config strategy
+#  essay in lib/safer-common.sh.
+#
+#  Copilot asks you to TRUST a folder the first time it runs there, and
+#  records the answer in config.json. That file is written fresh for each run
+#  (see build_config for why it is not copied), with the module already
+#  listed as trusted, so the question does not come back at every start.
+#  Trust controls whether the module's own skills, plugins, MCP servers and
+#  hooks are loaded — and hooks run shell commands. Inside the container
+#  that is the sandbox running something, with no network and no host, which
+#  is what the container is for. If you would rather be asked, remove the
+#  trustedFolders line from write_config_json.
+#
+#  ---------------------------------------------------------------------------
+#  LOGGING IN — read this before the first run
+#  ---------------------------------------------------------------------------
+#  Copilot CLI accepts a token from the environment, in COPILOT_GITHUB_TOKEN,
+#  and uses it instead of anything stored. That is how the sandbox logs in:
+#  no /login inside the container, no browser, no device code.
+#
+#  WHICH TOKEN MATTERS MORE THAN FOR THE OTHER THREE TOOLS. Claude's and
+#  Codex's tokens can only talk to their model API, so the network is what
+#  makes a stolen token harmless. A GitHub token is different: the same host
+#  that validates it, api.github.com, also creates gists, opens issues and
+#  comments on pull requests — on any public repository, under your name.
+#  That is a place an attacker can read. The allowlist cannot close it,
+#  because the model API lives at GitHub too.
+#
+#  So the token must be one that CANNOT write to GitHub:
+#
+#      A fine-grained personal access token with ONE permission, under
+#      Account permissions: "Copilot Requests". Nothing else. No repository
+#      access. It can ask the model questions and do nothing else.
+#
+#  Create it at github.com/settings/personal-access-tokens, then store it in
+#  your login Keychain under the name below. You are asked for the token;
+#  it is not shown and it never appears in your shell history:
+#
+#      security add-generic-password -a "$USER" -s safer-copilot-token -w
+#
+#  The launcher reads that entry at each start and hands it to the container
+#  through a file only the docker command reads — not on the command line,
+#  so it is not in `ps` and not in SAFER_DEBUG output. Set the expiry you
+#  are comfortable with; when it expires, `security delete-generic-password
+#  -s safer-copilot-token` and add the new one.
+#
+#  WHAT IS DELIBERATELY NOT DONE: reading the token that `copilot login` put
+#  in your Keychain (the entry named copilot-cli), or your `gh auth` token.
+#  Both are OAuth tokens, and the Copilot CLI one is issued with the scopes
+#  read:user, read:org, repo, gist, codespace — everything the paragraph
+#  above warns about. The launcher warns when the seeded token is not a
+#  fine-grained one, and runs anyway, because the decision is yours — but
+#  read the paragraph above before you make it.
+#
+#  If no token is found the CLI starts, says so, and offers /login. That
+#  needs github.com, which the allowlist refuses. Stop, create the token,
+#  start again.
+#
+#  ---------------------------------------------------------------------------
+#  SESSION HISTORY PERSISTS — per module, in this launcher's own folder
+#  ---------------------------------------------------------------------------
+#  `copilot --resume` and `--continue` see the sessions from earlier container
+#  runs started in the same module. They are kept in
+#
+#      <launcher folder>/history/copilot/<module slug>/session-state/
+#
+#  for the same reason safer-codex does it: Copilot keeps every project's
+#  sessions in one pile, and a sandbox for one module should not read the
+#  rest. The slug is the module path with every non-letter turned into a
+#  dash, the same name Claude Code uses under ~/.claude/projects. See the
+#  header of safer-codex for why the pile sits in this folder and not in
+#  ~/.copilot or the module.
+#
+#  Only session-state is kept. The prompt history (one file for all
+#  projects), the logs, the open-session bookkeeping and the config are the
+#  throwaway copy. Your native copilot does not see the sandbox sessions;
+#  `safer-copilot --history` lists them. There is no merge command: Copilot's
+#  session folder format is its own, and copying it by hand into ~/.copilot
+#  is a decision to make with that format in front of you.
+#
+#  ---------------------------------------------------------------------------
+#  WHAT THE LAUNCHER ADDS TO THE COPILOT COMMAND LINE, AND WHY
+#  ---------------------------------------------------------------------------
+#  --disable-builtin-mcps   Copilot starts two remote MCP servers of its own,
+#                           github-mcp-server and githubiq. They give the
+#                           agent tools that WRITE to GitHub — the publishing
+#                           channel described under LOGGING IN — and their
+#                           host is not on the allowlist, so left on they
+#                           would also stall at startup while the refusal
+#                           times out.
+#  --no-remote-export       Copilot can keep a copy of the session on GitHub
+#                           for its web and mobile apps, and let those steer
+#                           the session. The prompts reach GitHub anyway; a
+#                           stored transcript is a second place for your code
+#                           to live, and remote control is a second way into
+#                           the sandbox. Off.
+#  --add-dir PATH           one per --add, --rw and --with-* folder. Copilot
+#                           restricts its OWN file tools to the working
+#                           directory and asks before reading outside it.
+#                           Mounted folders sit at their Mac path, outside the
+#                           working directory, so without this it would ask
+#                           on every read of core/. The flag also loads that
+#                           folder's .github/skills and .github/agents, which
+#                           are prompts — the same stance this project takes
+#                           on CLAUDE.md and AGENTS.md.
+#
+#  Environment: COPILOT_AUTO_UPDATE=false. The CLI otherwise downloads newer
+#  releases in the background and runs them next time. The image is rebuilt
+#  from your Mac's version, the filesystem is read-only, and github.com is
+#  refused, so the download would only fail slowly.
+#
+#  Not added: --allow-all, --yolo or any permission flag. Copilot's own
+#  "may I run this command" prompts stay as you have them. They are not the
+#  sandbox, but they are the only thing between the agent and `rm -rf` of
+#  the one folder it CAN write.
+# =============================================================================
+
+set -euo pipefail
+
+
+# ---------------------------------------------------------------------------
+#  Find the folder this command lives in, and load the shared machinery.
+#
+#  BASH_SOURCE[0] is the path to this file. `dirname` strips the filename.
+#  `cd ... && pwd -P` turns it into a full path with all symlinks resolved.
+# ---------------------------------------------------------------------------
+SAFER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+TOOL="copilot"
+
+# shellcheck source=lib/safer-common.sh
+source "$SAFER_ROOT/lib/safer-common.sh"
+
+
+usage() {
+    echo "Usage: safer-copilot [--add PATH] [--with-core] [--with-modules]"
+    echo "                     [--with-themes] [--with-contrib] [--with-vendor]"
+    echo "                     [--with-config] [--with-all] [--with-*-rw] [--rw PATH]"
+    echo "                     [--allow HOST] [--offline] [-- COMMAND ...]"
+    echo "       safer-copilot --repair"
+    echo "       safer-copilot --history"
+    echo ""
+    echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
+    echo "  --with-core     mount <web root>/core read-only, found from the"
+    echo "  --with-modules  repository root. Likewise <web root>/modules,"
+    echo "  --with-themes   <web root>/themes, <web root>/modules/contrib"
+    echo "  --with-contrib  and the composer vendor folder. Saves counting"
+    echo "  --with-vendor   ../ in --add"
+    echo "  --with-config   mount the config export folder read-only. Its place"
+    echo "                  is read from sites/default/settings.php on your Mac;"
+    echo "                  the parent of the sync folder is mounted, so config"
+    echo "                  split folders come along"
+    echo "  --with-all      core, modules, themes, vendor and config in one flag"
+    echo "  --with-*-rw     any --with flag read-WRITE: --with-config-rw for a"
+    echo "                  config export, --with-all-rw for everything. Each"
+    echo "                  folder is confirmed like --rw"
+    echo "  --rw PATH       mount a folder read-WRITE. The agent can change"
+    echo "                  your Mac through it, so ask for it by name. A"
+    echo "                  folder outside your project must be confirmed."
+    echo "  --allow HOST    allow one extra destination for this run only"
+    echo "  --offline       no network at all"
+    echo "  --repair        undo what a run killed with kill -9 left behind,"
+    echo "                  then stop. No container. See sessions/README.md"
+    echo ""
+    echo "  --history       list the saved sandbox sessions per module. No container."
+    echo ""
+    echo "Anything else is passed to copilot itself, e.g. --reasoning-effort high."
+    echo ""
+    echo "The folder you run in is always read-write. Inside every mounted"
+    echo "folder, .git and the paths in dangerous-paths.txt are covered so"
+    echo "the agent cannot write them. That list cannot be complete, so at"
+    echo "exit the run reports every auto-run file that appeared during the"
+    echo "session. Read it before you commit."
+}
+
+
+# =============================================================================
+#  What is specific to Copilot CLI
+# =============================================================================
+
+IMAGE="safer-agent-copilot"
+DOCKERFILE="$DOCKER_DIR/Dockerfile.copilot"
+
+# Prints "GitHub Copilot CLI 1.0.91." — the shared version check takes the
+# number out of that. Note it is `--version`, not `version`: the latter also
+# asks api.github.com whether a newer release exists.
+VERSION_COMMAND=(copilot --version)
+
+# The flags are explained in the header. --add-dir entries are appended to
+# this below, once the mounts are known.
+DEFAULT_COMMAND=(copilot --disable-builtin-mcps --no-remote-export)
+
+CFG_HOST="$HOME/.copilot"                # on your Mac
+CFG_CONT="/home/agent/.copilot"          # inside the container
+STORE_ROOT="$HISTORY_DIR/copilot"        # one folder per module, see header
+
+# The Keychain entry YOU create, holding a fine-grained token. See LOGGING IN.
+KEYCHAIN_SERVICE="safer-copilot-token"
+
+# Neither folder is mounted directly. The cache holds the unpacked tool, which
+# the image carries its own copy of; --add must not reach either.
+PROTECTED_ROOTS+=("$CFG_HOST" "$HOME/Library/Caches/copilot")
+
+# ---------------------------------------------------------------------------
+#  Environment variables for the container. See the header for each.
+#
+#  Telemetry has no documented switch. Rather than invent a variable name
+#  that does nothing, it is left to the gatekeeper: the telemetry host is not
+#  on the allowlist, the refusal lands in connection_logs/, and you decide
+#  about it with evidence.
+# ---------------------------------------------------------------------------
+TOOL_ENV=(
+    --env COPILOT_AUTO_UPDATE=false
+)
+
+
+# ---------------------------------------------------------------------------
+#  Hand the token to the container.
+#
+#  Read from the Keychain entry named above; failing that, from a
+#  COPILOT_GITHUB_TOKEN already in your shell. Written to a file in the
+#  scratch area and passed with --env-file, which the docker command on your
+#  Mac reads itself. The token is then in the container's environment, where
+#  the CLI looks for it, and nowhere on a command line.
+#
+#  Fine-grained tokens start with github_pat_. Anything else is accepted with
+#  a warning, because the header explains what a wider token can do and the
+#  choice is yours.
+# ---------------------------------------------------------------------------
+seed_token() {
+    local token="" source="" env_file
+
+    # `security` exists only on macOS, so Linux skips straight to the variable.
+    if command -v security >/dev/null 2>&1; then
+        token="$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null || true)"
+        [[ -n "$token" ]] && source="the Keychain entry \"$KEYCHAIN_SERVICE\""
+    fi
+
+    if [[ -z "$token" && -n "${COPILOT_GITHUB_TOKEN:-}" ]]; then
+        token="$COPILOT_GITHUB_TOKEN"
+        source="COPILOT_GITHUB_TOKEN in your shell"
+    fi
+
+    # Strip the newline the Keychain may hand back with the value.
+    token="${token//[$'\r\n']/}"
+
+    if [[ -z "$token" ]]; then
+        echo "Login: no token found. The CLI will offer /login, which needs github.com"
+        echo "       and is refused by the allowlist. Create a fine-grained token with"
+        echo "       only the \"Copilot Requests\" permission and store it with:"
+        echo "           security add-generic-password -a \"\$USER\" -s $KEYCHAIN_SERVICE -w"
+        echo "       Read LOGGING IN at the top of safer-copilot for why that token."
+        return 0
+    fi
+
+    # A token is a single word. Anything else is not a token and must not be
+    # written into a file that is parsed line by line. A regex rather than an
+    # extended glob, because the stock macOS bash (3.2) has no extglob in [[ ]].
+    if [[ ! "$token" =~ ^[A-Za-z0-9_]+$ ]]; then
+        echo "Error: the token from $source contains characters a GitHub token never has." >&2
+        echo "Check the Keychain entry; nothing was started." >&2
+        exit 1
+    fi
+
+    init_scratch
+    env_file="$SCRATCH_DIR/copilot.env"
+    ( umask 077; printf 'COPILOT_GITHUB_TOKEN=%s\n' "$token" > "$env_file" )
+    TOOL_ENV+=(--env-file "$env_file")
+
+    case "$token" in
+        github_pat_*)
+            echo "Login: fine-grained token seeded from $source."
+            ;;
+        *)
+            echo ""
+            echo "  WARNING: the token from $source is not a fine-grained token"
+            echo "           (it does not start with github_pat_). An OAuth or classic"
+            echo "           token can create gists and post to any public repository"
+            echo "           through api.github.com, which is on the allowlist. That is a"
+            echo "           place an attacker can read. Read LOGGING IN at the top of"
+            echo "           safer-copilot. Continuing anyway."
+            echo ""
+            ;;
+    esac
+}
+
+
+# ---------------------------------------------------------------------------
+#  A fresh config.json for the throwaway copy. See build_config for why it is
+#  written rather than copied.
+#
+#  $HOST_PATH is also the path inside the container, so the trusted folder is
+#  named by that. The JSON is written by hand because the path cannot contain
+#  a double quote or a backslash (check_mount_path refuses both, as Docker
+#  would), so no escaping is needed.
+# ---------------------------------------------------------------------------
+write_config_json() {
+    local now
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    {
+        echo '{'
+        echo "  \"firstLaunchAt\": \"$now\","
+        echo "  \"trustedFolders\": [\"$HOST_PATH\"]"
+        echo '}'
+    } > "$CUR_BASE/config.json"
+    chmod 0600 "$CUR_BASE/config.json"
+}
+
+
+# ---------------------------------------------------------------------------
+#  Build the container's ~/.copilot as a throwaway copy.
+#
+#  Read the config strategy essay in lib/safer-common.sh first — it explains
+#  why this is a copy rather than a mount, and why that removes the hook risk
+#  instead of merely containing it.
+# ---------------------------------------------------------------------------
+build_config() {
+    local store
+
+    config_root "$CFG_HOST" "$CFG_CONT" copilot
+
+    # settings.json holds statusLine.command, a shell command, and is
+    # rewritten by /settings, /model and friends. As a copy it is safe to let
+    # the CLI rewrite it, which also means settings can be saved in-session.
+    copy_in settings.json json
+
+    # config.json is NOT copied from your Mac. It is the CLI's own bookkeeping
+    # — logged-in users, installed plugins, trusted folders — and it is also
+    # where the login token lands in plain text when the CLI is told to store
+    # it outside the Keychain (the storeTokenPlaintext setting). That is your
+    # full-scope OAuth token; see LOGGING IN for what it can do from inside
+    # the sandbox. Rather than filter the file, write a fresh one with the two
+    # things the sandbox wants from it: no first-launch banner, and this
+    # module already trusted, so the trust question does not come back at
+    # every start. Trust loads the module's own skills, MCP servers and hooks
+    # — inside the container.
+    #
+    # The key name is the one GitHub's configuration page documents. If it is
+    # ever wrong, nothing breaks: the trust question simply appears.
+    write_config_json
+
+    # MCP and LSP servers start processes. Inside the container that is
+    # contained; as copies, whatever the agent adds dies with the session.
+    copy_in mcp-config.json
+    copy_in lsp-config.json
+
+    # Your saved "always allow" answers, keyed by project path. Copied so they
+    # apply, and so new ones can be saved in-session; they are discarded with
+    # the session, like every other setting.
+    copy_in permissions-config.json
+
+    # NOT copied: providers.json. It holds API keys for a custom model
+    # provider. The sandbox logs in to GitHub, so it has no use for them.
+
+    # Your own skills, agents, instructions and plugins, so the sandbox
+    # behaves like your normal setup. Read-only so the agent cannot add any.
+    # Plugins carry hooks, which run shell commands — in the container.
+    ro_back copilot-instructions.md instructions skills agents \
+            installed-plugins extensions hooks
+
+    # This module's sessions, from the per-module store in the launcher
+    # folder. NOT from ~/.copilot: see the header.
+    store="$STORE_ROOT/$(project_slug "$HOST_PATH")"
+    rw_store "$store" session-state
+
+    # NOT bound back, so they are per-session and discarded:
+    #   command-history-state.json   prompt history from every project
+    #   session-store.db             the index over the sessions; the CLI
+    #                                rebuilds it (/chronicle reindex)
+    #   open-sessions-state.json     which sessions are open, on your Mac
+    #   sidebar-sessions-state/      the picker's cache
+    #   mcp-oauth-config/ mcp-secrets/   MCP credentials
+    #   logs/  servers/  ide/  plugin-data/
+    seed_token
+
+    echo "History for this module: $store"
+    echo "Config: throwaway copy — settings changed in the sandbox do not persist."
+}
+
+
+# =============================================================================
+#  safer-copilot --history
+#
+#  Runs on your Mac and never starts a container. One block per module: the
+#  slug, how many sessions, the newest. A session is a folder named with a
+#  UUID under session-state/; anything else there is bookkeeping and is not
+#  counted. `find` without -L does not follow a symlink the agent may have
+#  planted, so one is skipped, not resolved.
+# =============================================================================
+
+SESSION_DIR_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+history_overview() {
+    local store name count newest
+
+    if [[ ! -d "$STORE_ROOT" ]]; then
+        echo "No saved history yet: $STORE_ROOT does not exist."
+        echo "It is created the first time safer-copilot runs in a module."
+        return 0
+    fi
+
+    echo "Saved sandbox sessions, per module, in $STORE_ROOT"
+    echo ""
+    for store in "$STORE_ROOT"/*/; do
+        [[ -d "$store" ]] || continue
+        store="${store%/}"
+        count=0
+        newest=""
+        while IFS= read -r name; do
+            [[ -n "$name" ]] || continue
+            printf '%s\n' "$(basename "$name")" | grep -Eq "$SESSION_DIR_RE" || continue
+            count=$((count + 1))
+            # `date -r FILE` prints the file's modification date on both macOS
+            # and Linux. The newest session is the one with the largest date.
+            name="$(date -r "$name" +%Y-%m-%d)"
+            if [[ "$name" > "$newest" ]]; then
+                newest="$name"
+            fi
+        done < <(find "$store/session-state" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+        echo "  $(basename "$store")"
+        echo "      sessions: $count    newest: ${newest:-—}"
+    done
+    echo ""
+    echo "To resume one, run safer-copilot in that module and use --resume."
+    echo "To forget one module's history:   rm -r $STORE_ROOT/<slug>"
+}
+
+
+# =============================================================================
+#  Read the command line
+#
+#  --history is handled here, because it runs on your Mac and stops. Every
+#  other argument goes to the shared parser; see section 11 of
+#  lib/safer-common.sh.
+# =============================================================================
+
+while [[ $# -gt 0 ]]; do             # $# = how many arguments are left
+    case "$1" in
+        --history)
+            history_overview
+            exit 0
+            ;;
+        *)
+            parse_common_arg "$@"
+            shift "$ARGS_CONSUMED"
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+#  Tell Copilot about the extra folders. See --add-dir in the header.
+#
+#  MOUNT_ROOTS holds every --add, --rw and --with-* folder, at its Mac path,
+#  which is also its path in the container. The working directory is not in
+#  it and needs no flag.
+# ---------------------------------------------------------------------------
+for dir in ${MOUNT_ROOTS+"${MOUNT_ROOTS[@]}"}; do
+    DEFAULT_COMMAND+=(--add-dir "$dir")
+done
+
+safer_resolve_command
+
+
+# =============================================================================
+#  Assemble and run
+# =============================================================================
+
+safer_check_workdir          # sets HOST_PATH; build_config needs it
+safer_ensure_agent_image
+
+build_config
+apply_config_copies          # nothing registered for copilot; harmless
+
+safer_protect_paths
+safer_setup_network
+safer_run

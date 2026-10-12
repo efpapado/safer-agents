@@ -10,10 +10,10 @@
 > own sandbox, so the blind spots of one may be the blind spots of the review.
 > And the code is what the comments say it is only where somebody checked.
 
-Run Claude Code, Codex or opencode on a Drupal module without giving them your
-Mac.
+Run Claude Code, Codex, opencode or GitHub Copilot CLI on a Drupal module
+without giving them your Mac.
 
-`safer-agent` is three wrapper commands. Each one starts its coding agent inside
+`safer-agent` is four wrapper commands. Each one starts its coding agent inside
 a Docker container that can edit one module and can do very little else. Your
 files change. Your machine does not.
 
@@ -21,6 +21,7 @@ files change. Your machine does not.
 safer-claude          # Claude Code
 safer-codex           # Codex
 safer-opencode        # opencode
+safer-copilot         # GitHub Copilot CLI
 ```
 
 **This project is built for Drupal work.** The image is PHP 8.3 command-line
@@ -31,8 +32,8 @@ database driver. The intended shape of a session is one module:
    is mounted read-write. The agent writes its code there.
 2. Add what the agent must READ: Drupal core, a contrib module, another
    custom module, a theme, the vendor tree. Use `--with-core`, `--with-modules`,
-   `--with-contrib`, `--with-vendor` and `--with-config` for the standard
-   folders, `--with-all` for the four everyday ones at once, and `--add`
+   `--with-themes`, `--with-contrib`, `--with-vendor` and `--with-config` for
+   the standard folders, `--with-all` for the five everyday ones at once, and `--add`
    for anything else. Those mounts are read-only. Add `-rw` to a `--with`
    flag to make that folder writable.
 3. Everything else on your Mac stays closed. The site root, `settings.php`, the
@@ -73,10 +74,10 @@ The first is the easy one. Most of this project is the other two.
 | macOS | This is what it is built and tested for. It uses the login Keychain to seed credentials, and Docker Desktop's path sharing. |
 | Docker Desktop | Running. The commands build their own images and never download one. |
 | Bash | The commands run under `bash`, not `sh`. The stock macOS `/bin/bash` is enough — they avoid bash 4 syntax on purpose. |
-| The agent itself, installed on your Mac | `claude`, `codex` or `opencode` must be on your `PATH`. The launcher reads its version and builds an image with the same one, so the sandbox matches what you use. |
+| The agent itself, installed on your Mac | `claude`, `codex`, `opencode` or `copilot` must be on your `PATH`. The launcher reads its version and builds an image with the same one, so the sandbox matches what you use. |
 
-You do **not** need to be logged in inside the container. `safer-claude` seeds
-the token from your Keychain. See [Logging in](#logging-in).
+You do **not** need to be logged in inside the container. `safer-claude` and
+`safer-copilot` seed a token from your Keychain. See [Logging in](#logging-in).
 
 ---
 
@@ -87,7 +88,7 @@ There is nothing to compile and nothing to install into your system.
 ```bash
 git clone <this repository> ~/tools/safer-agent
 cd ~/tools/safer-agent
-chmod +x safer-claude safer-codex safer-opencode
+chmod +x safer-claude safer-codex safer-opencode safer-copilot
 ```
 
 Put the folder on your `PATH`:
@@ -98,7 +99,7 @@ exec zsh
 ```
 
 The commands find their own library, image recipes and lists relative to
-themselves, so the folder can live anywhere. Keep the four parts together:
+themselves, so the folder can live anywhere. Keep the parts together:
 `safer-*`, `lib/`, `docker/` and `proxy/`.
 
 ---
@@ -184,7 +185,8 @@ not the site.
     │   └── custom/
     │       ├── my_module/            <- run here. Read-write.
     │       └── my_other_module/      --add   when the two share a service
-    └── themes/custom/my_theme/       --add   for templates and preprocess work
+    └── themes/                       --with-themes   every theme at once
+        └── custom/my_theme/          --add   for templates and preprocess work
 ```
 
 Start the session in the module:
@@ -200,14 +202,15 @@ their own. Anything else takes `--add` with a path relative to the module:
 |---|---|
 | Drupal core | `--with-core` (or `--add ../../../core`) |
 | Every module, custom and contrib | `--with-modules` |
+| Every theme, custom and contrib | `--with-themes` |
 | All contrib modules | `--with-contrib` |
 | One contrib module | `--add ../../contrib/webform` |
 | Another custom module | `--add ../my_other_module` |
-| A custom theme | `--add ../../../themes/custom/my_theme` |
+| One custom theme | `--add ../../../themes/custom/my_theme` |
 | The vendor tree | `--with-vendor` (or `--add ../../../../vendor`) |
 | The config export | `--with-config`, or `--with-config-rw` to let the agent export config |
-| Core, modules, vendor and config together | `--with-all`, or `--with-all-rw` to make them all writable |
-| Any of the above, writable | Add `-rw` to the flag: `--with-modules-rw`, `--with-vendor-rw` |
+| Core, modules, themes, vendor and config together | `--with-all`, or `--with-all-rw` to make them all writable |
+| Any of the above, writable | Add `-rw` to the flag: `--with-modules-rw`, `--with-themes-rw` |
 
 ### How the `--with-*` flags find the folders
 
@@ -326,24 +329,33 @@ safer-codex    --history | --merge-history
 safer-opencode [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
                [--with-config] [--with-all] [--with-*-rw]
                [--rw PATH] [--allow HOST] [--ollama] [--offline] [-- COMMAND ...]
+safer-copilot  [--add PATH] [--with-core] [--with-modules] [--with-contrib] [--with-vendor]
+               [--with-config] [--with-all] [--with-*-rw]
+               [--rw PATH] [--allow HOST] [--offline] [-- COMMAND ...]
+safer-copilot  --history
 ```
+
+Anything that is not one of these flags is passed to the agent itself, so
+`safer-copilot --reasoning-effort high` or `safer-codex --model o3` work as
+they would natively.
 
 | Flag | What it does |
 |---|---|
 | `--add PATH` | Mount another folder **read-only**. `--ro` is the same flag. This is the normal way to give the agent Drupal core, a contrib module, a theme or the vendor tree. Repeat it for each one. |
 | `--with-core` | Mount `<web root>/core` **read-only**. The web root is found from the repository root, so the flag works from any folder inside the site. See [How the `--with-*` flags find the folders](#how-the---with--flags-find-the-folders). |
 | `--with-modules` | Mount `<web root>/modules` read-only: every custom and contrib module. |
+| `--with-themes` | Mount `<web root>/themes` read-only: every custom and contrib theme. |
 | `--with-contrib` | Mount `<web root>/modules/contrib` read-only. |
 | `--with-vendor` | Mount the composer vendor folder read-only. |
 | `--with-config` | Mount the config export folder read-only. Its place is read from `sites/default/settings.php` on your Mac. The parent of the `sync` folder is mounted, so `config_split` folders come along. |
-| `--with-all` | `--with-core`, `--with-modules`, `--with-vendor` and `--with-config` in one flag. Contrib is left out because it is already inside modules. |
-| `--with-*-rw` | Any `--with` flag with `-rw` added mounts that folder **read-write**: `--with-config-rw` lets the agent export config, `--with-all-rw` makes all four folders writable. Each folder is confirmed like `--rw`. |
+| `--with-all` | `--with-core`, `--with-modules`, `--with-themes`, `--with-vendor` and `--with-config` in one flag. Contrib is left out because it is already inside modules. A site with no `themes` folder skips that part. |
+| `--with-*-rw` | Any `--with` flag with `-rw` added mounts that folder **read-write**: `--with-config-rw` lets the agent export config, `--with-all-rw` makes all five folders writable. Each folder is confirmed like `--rw`. |
 | `--rw PATH` | Mount another folder **read-write**. The agent can change your Mac through it. Use it only for a second custom module you are really editing. A folder outside your project must be confirmed by typing `yes`. |
 | `--allow HOST` | Allow one more destination, for this run only. |
 | `--offline` | No network at all. The strongest mode, and the right one for a read-only analysis pass. |
 | `--effort LEVEL` | `safer-claude` only. `low`, `medium`, `high`, `xhigh` or `max`. Overrides `/effort` for the whole session, so leave it off for interactive work. |
 | `--ollama` | `safer-opencode` only. Reach the Ollama server on your Mac. Inference and read-only queries pass; model downloads, uploads and deletions are refused. |
-| `--history` | `safer-codex` only. List the saved sandbox sessions per module and stop. No container starts. |
+| `--history` | `safer-codex` and `safer-copilot`. List the saved sandbox sessions per module and stop. No container starts. |
 | `--merge-history` | `safer-codex` only. Copy every saved sandbox session into your Mac's `~/.codex`, so the native `codex resume --all` lists them. Copies only; existing files are left alone. |
 | `-- COMMAND ...` | Run something else instead of the agent. `-- bash` gives you a shell in the sandbox, which is the fastest way to see what the agent can see. |
 
@@ -410,8 +422,8 @@ fails if it comes back.
 Two different mechanisms, because the problem has two halves.
 
 **The tool's own config is a throwaway copy.** The container gets a copy of
-`~/.claude` (or `~/.codex`, `~/.config/opencode`), and only what genuinely has
-to be shared is bound back. Your Mac never reads that copy, so a hook the agent
+`~/.claude` (or `~/.codex`, `~/.config/opencode`, `~/.copilot`), and only what
+genuinely has to be shared is bound back. Your Mac never reads that copy, so a hook the agent
 writes into it dies with the session. This is default-deny: anything not
 explicitly shared is simply not shared.
 
@@ -466,6 +478,12 @@ Read this part. The rest of the README is the good news.
   somewhere else. A later host process that follows it acts on the target.
 - **Anything you put in a prompt.** That reaches the model provider under your
   own account.
+- **A GitHub token that can write.** `safer-copilot` is the one command whose
+  model API lives at a host that also publishes: `api.github.com` takes gists,
+  issues and pull-request comments, and the allowlist cannot refuse it. The
+  network does not make that token harmless; its permissions do. Use the
+  fine-grained token described under [Logging in](#logging-in), and nothing
+  wider.
 
 The single habit that covers most of this: **read the diff on your Mac before
 you commit, and read the exit report first.** Use `git status --ignored` — the
@@ -482,6 +500,29 @@ your Keychain is never reachable from the container.
 If no token is found, run `/login` inside the sandbox. There is no browser in
 the image, so use the manual code paste.
 
+`safer-copilot` also seeds a token from the Keychain, but not the one
+`copilot login` stores. That is an OAuth token with the `repo` and `gist`
+scopes, and `api.github.com` is on the allowlist because the model API lives
+at GitHub too. So that token would let the agent publish your code to a gist
+or a public issue under your name. Instead you create a token that can only
+ask the model questions, once:
+
+1. On GitHub, under Settings, Developer settings, create a **fine-grained
+   personal access token**. Give it one permission, under Account
+   permissions: **Copilot Requests**. No repository access.
+2. Store it in your login Keychain. You are asked for the value; it is not
+   shown and it does not land in your shell history:
+
+   ```bash
+   security add-generic-password -a "$USER" -s safer-copilot-token -w
+   ```
+
+The launcher reads that entry at each start and hands it to the container
+through a file that only the `docker` command reads. It warns if the token is
+not a fine-grained one. When the token expires, delete the entry and add the
+new one. There is no `/login` inside the Copilot sandbox: it needs
+`github.com`, which the allowlist refuses on purpose.
+
 ---
 
 ## Layout
@@ -490,30 +531,34 @@ the image, so use the manual code paste.
 safer-claude                  one command per tool. Each holds only that
 safer-codex                   tool's own flags, config strategy, image
 safer-opencode                and allowlist.
+safer-copilot
 
-lib/safer-common.sh           the sandbox machinery, shared by all three.
+lib/safer-common.sh           the sandbox machinery, shared by all four.
 
 dangerous-paths.txt           paths the agent may not write, in any mounted
                               tree.                        <- edit this one
 
-docker/Dockerfile.claude      one agent image per tool. Nearly identical;
-docker/Dockerfile.codex       they differ in the npm package installed last.
-docker/Dockerfile.opencode
+docker/Dockerfile.claude      one agent image per tool. The first three are
+docker/Dockerfile.codex       nearly identical and differ in the npm package
+docker/Dockerfile.opencode    installed last. Copilot is one native
+docker/Dockerfile.copilot     executable, so its image has no Node.js.
 docker/Dockerfile.proxy       the gatekeeper (tinyproxy).  Shared.
 docker/Dockerfile.forwarder   the Ollama forwarder (nginx). opencode only.
 
-proxy/allowlist-common.txt    destinations for all three.  <- edit this one
+proxy/allowlist-common.txt    destinations for all four.   <- edit this one
 proxy/allowlist-claude.txt    that tool's own service only
 proxy/allowlist-codex.txt
 proxy/allowlist-opencode.txt
+proxy/allowlist-copilot.txt
 proxy/tinyproxy.conf          gatekeeper configuration
 proxy/ollama.conf             the forwarder's default-deny rules
 
 connection_logs/              <tool>-<timestamp>.log, the newest 30 per tool
 connection_logs/README.md     how to read them
 
-history/codex/<module slug>/  Codex session history, one folder per module.
-history/README.md             Ignored by git, apart from the README.
+history/codex/<module slug>/  Codex and Copilot session history, one folder
+history/copilot/<module slug>/  per module. Ignored by git, apart from the
+history/README.md             README.
 ```
 
 ---
@@ -557,12 +602,15 @@ the explanations are where the code is.
 | `lib/safer-common.sh` § 10 | The sealed network, the gatekeeper, and the connection log. |
 | `lib/safer-common.sh` § 13 | When an image rebuilds, and why the check is not version-only. |
 | `docker/Dockerfile.claude` | What is in the image, and why git is purged twice and then asserted absent. |
+| `docker/Dockerfile.copilot` | Why the Copilot image downloads one executable instead of an npm package, how the download is checked, and why its package cache is unpacked at build time. |
+| `safer-copilot` | The token question: why a GitHub token is not like the other tools' tokens, and which one to create. Also what the launcher adds to the `copilot` command line. |
+| `proxy/allowlist-copilot.txt` | Copilot's hosts, and why `github.com` stays refused even though the model API lives at GitHub. |
 | `docker/Dockerfile.forwarder` | Why the Ollama path needs nginx and not a byte-copying relay. |
 | `proxy/allowlist-common.txt` | The rules for widening the network, including which reputable hosts are still a bad idea. |
 | `proxy/ollama.conf` | Which Ollama endpoints are permitted, and which are refused. |
 | `connection_logs/README.md` | How to read a log, how to decide whether to allow a host, and what the logs cannot tell you. |
 | `connection_logs/*.log` | What each run tried to reach and what appeared in your project. |
-| `history/README.md` | Where Codex session history is kept, why it is here, and how to list, merge or delete it. |
+| `history/README.md` | Where Codex and Copilot session history is kept, why it is here, and how to list, merge or delete it. |
 
 ---
 
@@ -581,6 +629,18 @@ These are recorded properly in the files that own them; this is the short list.
   not see them until you run `safer-codex --merge-history`. The prompt history
   file and the SQLite index are not kept; Codex rebuilds the index from the
   session files, so the first `codex resume` of a run can be slow.
+  `safer-copilot` does the same in `history/copilot/`, so `copilot --resume`
+  works across runs; there is no merge command for it.
+- `safer-copilot` is the least tested of the four. It was written from the
+  Copilot CLI executable and GitHub's documentation, and the image was not
+  built on a Mac before it was committed. Expect the first run to show a
+  refused host or two in the connection log, and read
+  `proxy/allowlist-copilot.txt` for what each one is.
+- The Copilot image has no Node.js, because Copilot CLI does not need it. An
+  MCP server configured with `npx` cannot start inside that sandbox.
+- Copilot CLI's own file-access check is told about every mounted folder with
+  `--add-dir`, so it does not ask before reading `core/`. That flag also loads
+  any `.github/skills` and `.github/agents` found there; those are prompts.
 - A resumed Codex conversation remembers excerpts from folders you mounted
   last time, even if you leave the `--add` off this time. Mounts and network
   always come from the current command line, never from the transcript.
@@ -590,7 +650,7 @@ These are recorded properly in the files that own them; this is the short list.
   in your project, the `.git/info/exclude` entries that hid them stay too, and
   the exit scan does not run. Each run writes a record of both to `sessions/`
   before it starts, and deletes it when it ends normally. Run
-  `safer-claude --repair` (any of the three commands) to undo what a dead run
+  `safer-claude --repair` (any of the four commands) to undo what a dead run
   left, or just launch again: every launch does the same repair first. See
   `sessions/README.md`.
 - No database driver, so Drupal kernel and functional tests cannot run in the
@@ -609,7 +669,8 @@ Some of this depends on a habit rather than on code, and the files say so where
 it matters:
 
 - The agents are never run natively in a real project folder. On the Mac they
-  are started only in empty folders, to change settings or update hooks.
+  are started only in empty folders, to change settings, update hooks or
+  install plugins.
 - Only code is mounted, and the read-write mount is a single module. Core,
   contrib and vendor go in read-only when they are needed at all.
 - Secret-bearing paths are never mounted: `sites/default/settings.php`,

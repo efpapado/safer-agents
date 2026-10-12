@@ -1,0 +1,133 @@
+# =============================================================================
+#  allowlist-copilot.txt — destinations for safer-copilot only
+# =============================================================================
+#
+#  Read together with allowlist-common.txt, which holds the documentation hosts
+#  shared by all four commands. Put general-purpose sites there, not here.
+#  This file is for Copilot CLI's own services.
+#
+#  Anchor every line and escape the dots — see allowlist-common.txt for why
+#  that is not cosmetic, and for the two rules about which hosts are safe to
+#  add at all.
+#
+#  Source: the hostnames compiled into the Copilot CLI executable, read with
+#  `strings`, and the first probe run. GitHub does not publish a complete list
+#  for the CLI, so treat this as a starting point and read connection_logs/
+#  after the first few sessions.
+#
+#  ---------------------------------------------------------------------------
+#  READ THIS FIRST: GitHub is a destination that can republish what it gets
+#  ---------------------------------------------------------------------------
+#  allowlist-common.txt refuses github.com, for rule 1: gists. Copilot CLI
+#  makes that rule hard to keep, because its own service LIVES at GitHub.
+#  Every request below goes to a GitHub host, and the token the agent holds
+#  is a GitHub token.
+#
+#  What stops the agent from posting your code where a stranger can read it
+#  is therefore not this file. It is the TOKEN:
+#
+#      A fine-grained personal access token with only the "Copilot Requests"
+#      permission can ask the model questions and nothing else. It cannot
+#      create a gist, open an issue, comment on a pull request or push to a
+#      repository, so api.github.com gives it nowhere to publish.
+#
+#      Your normal login token — the one `copilot login` stores in the
+#      Keychain, or a `gh auth` token — CAN do all of those. Give the sandbox
+#      that token and api.github.com becomes a destination an attacker can
+#      read from: a comment on a public repository is enough.
+#
+#  That is why safer-copilot seeds a token from a Keychain entry you create
+#  for it, and warns when the token is not a fine-grained one. Read the
+#  "LOGGING IN" section at the top of the safer-copilot command.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  REQUIRED
+# -----------------------------------------------------------------------------
+
+#  Authentication. The CLI checks the token here first (`GET /user`), then
+#  exchanges it for a short-lived Copilot session token. Without this host
+#  the CLI stops before the first prompt with
+#
+#      Authentication token found but could not be validated.
+#
+#  This is also the host that takes gist, issue and pull-request writes. See
+#  the note at the top: the token is what keeps those out of reach.
+^api\.github\.com$
+
+#  The model API itself: every request the agent makes to the model.
+#
+#  The exact host comes back from the token exchange and depends on your
+#  plan. The executable names the first one; the other three are the
+#  per-plan variants GitHub documents for its other Copilot clients. All four
+#  belong to the same service, so allowing the ones you do not use costs
+#  nothing. If connection_logs/ shows a refused `*.githubcopilot.com` host
+#  that is not here, that is your plan's endpoint — add it.
+^api\.githubcopilot\.com$
+^api\.individual\.githubcopilot\.com$
+^api\.business\.githubcopilot\.com$
+^api\.enterprise\.githubcopilot\.com$
+
+
+# -----------------------------------------------------------------------------
+#  OPTIONAL
+# -----------------------------------------------------------------------------
+
+#  Telemetry. The CLI has no documented switch to turn it off (GitHub's
+#  issue tracker has an open request for one), and the host it reports to is
+#  handed to it at login rather than compiled in, so it is not known for
+#  certain. GitHub's allowlist page for its Copilot clients names the hosts
+#  below. Left refused, they appear in connection_logs/ and the CLI's
+#  shutdown waits a bounded moment for the flush to fail. Allow them only if
+#  that wait bothers you more than the reporting does.
+#^copilot-telemetry\.githubusercontent\.com$
+#^collector\.github\.com$
+
+#  Feature experiments ("exp-tas") and the request-origin tracker, from the
+#  same page. Neither is needed to edit code. Expect them in the log.
+#^default\.exp-tas\.com$
+#^origin-tracker\.githubusercontent\.com$
+
+#  An older Copilot API host, kept on GitHub's page for other clients. Not
+#  seen from the CLI. Add it only if a log shows it.
+#^copilot-proxy\.githubusercontent\.com$
+
+#  Release checks and downloads. The CLI updates ITSELF by default: it checks
+#  api.github.com for a newer release and downloads it from github.com. Inside
+#  the sandbox safer-copilot sets COPILOT_AUTO_UPDATE=false, the filesystem is
+#  read-only, and the image is rebuilt from your Mac's version anyway. So
+#  nothing here is needed for updates. If `copilot update` is run inside the
+#  sandbox regardless, the download host is refused and the log shows it.
+#
+#  Do NOT add github.com for this. See the note at the top.
+
+
+# -----------------------------------------------------------------------------
+#  DELIBERATELY REFUSED
+# -----------------------------------------------------------------------------
+
+#  github.com — sign-in (the device-code flow), the web UI, release downloads,
+#  `/share` to a GitHub link, and gists. Sign-in is not done inside the
+#  sandbox: the token is seeded by safer-copilot. Everything else on this list
+#  is a reason to keep it out.
+#^github\.com$
+
+#  The built-in GitHub MCP server and the "githubiq" server. They would give
+#  the agent tools that write to GitHub — issues, pull requests, comments —
+#  which is the publishing channel described at the top. safer-copilot starts
+#  the CLI with --disable-builtin-mcps, so these are never contacted. If they
+#  show up in connection_logs/, that flag was lost.
+#^api\.mcp\.github\.com$
+
+#  Plugin marketplaces (github/copilot-plugins, github/awesome-copilot) are
+#  fetched from github.com and api.github.com with the token. A plugin is
+#  code the CLI runs. Install plugins on your Mac in an empty folder, under
+#  the operating policy; they come into the sandbox read-only from
+#  ~/.copilot/installed-plugins.
+
+#  Session export to GitHub web and mobile ("remote sessions"). Off in the
+#  sandbox: safer-copilot passes --no-remote-export. The transcript already
+#  reaches GitHub as prompts; keeping a copy of it on github.com is a second
+#  place for it to live, and remote CONTROL would be a second way into the
+#  sandbox. Remove the flag in safer-copilot if you want either back.

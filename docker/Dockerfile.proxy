@@ -26,8 +26,8 @@
 #  Adding them back to install a firewall would undo protections we want. So
 #  the control has to sit outside the agent's container.
 #
-#  ONE IMAGE, ALL THREE COMMANDS
-#  safer-claude, safer-codex and safer-opencode all use this. Nothing in it is
+#  ONE IMAGE, ALL FOUR COMMANDS
+#  safer-claude, safer-codex, safer-opencode and safer-copilot all use this. Nothing in it is
 #  tool-specific: what differs between the tools is the allowlist, which is a
 #  file mounted at run time, not part of the image.
 #

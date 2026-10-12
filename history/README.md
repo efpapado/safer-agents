@@ -1,10 +1,11 @@
 # history
 
 Session history that a tool cannot keep per project on its own. Today that is
-Codex only:
+Codex and Copilot CLI:
 
     history/codex/<module slug>/sessions/YYYY/MM/DD/rollout-*.jsonl
     history/codex/<module slug>/archived_sessions/...
+    history/copilot/<module slug>/session-state/<session uuid>/
 
 The slug is the module's full path with every character that is not a letter or
 digit replaced by a dash — the same name Claude Code uses under
@@ -14,12 +15,13 @@ Everything under this folder except this file is ignored by git. The rule lives
 in the repository's `.gitignore`, which is never mounted into a container, so
 the agent cannot change it.
 
-## Why it is here and not in `~/.codex`
+## Why it is here and not in `~/.codex` or `~/.copilot`
 
-Codex keeps every project's sessions in one folder. Binding that folder into
-the sandbox would show one module's agent the conversations of every project.
-So `safer-codex` gives each module its own folder here and mounts only that
-one. The others sit next to it on your Mac and never enter the container.
+Codex and Copilot CLI keep every project's sessions in one folder. Binding that
+folder into the sandbox would show one module's agent the conversations of
+every project. So `safer-codex` and `safer-copilot` give each module its own
+folder here and mount only that one. The others sit next to it on your Mac and
+never enter the container.
 
 The launcher folder is already protected: `--add`, `--rw` and the
 working-directory check refuse anything inside it. Docker mounts only the leaf
@@ -41,16 +43,24 @@ the end of a run and now stays on disk.
 
     safer-codex --history          one block per module: session count, newest day
     safer-codex --merge-history    copy every session into ~/.codex, skip existing
+    safer-copilot --history        one block per module: session count, newest day
 
-Both run on your Mac without a container. The merge copies; it never moves,
+All run on your Mac without a container. The merge copies; it never moves,
 overwrites or deletes. Run it whenever you want an overview in your native
 Codex, then list them there with `codex resume --all` from an empty folder.
 Without `--all` the picker shows only sessions recorded in the folder you are
 in, and the native tool is never started inside a module.
 
+There is no merge for Copilot. A Copilot session is a folder of several files
+plus an entry in an index database the CLI rebuilds on demand; copying one by
+hand into `~/.copilot/session-state` is a decision to make with that format in
+front of you. Inside the sandbox, `copilot --resume` lists this module's
+sessions as usual.
+
 To forget one module's history, delete its folder:
 
     rm -r history/codex/<module slug>
+    rm -r history/copilot/<module slug>
 
 ## Moving to a new Mac
 
@@ -60,7 +70,12 @@ folder to the new slug. Nothing inside the files depends on the folder name.
 
 ## What is not kept
 
-Only the two session folders persist. `config.toml`, `hooks.json`, the prompt
-history file `history.jsonl`, logs and Codex's SQLite index stay in the
-throwaway copy. Codex rebuilds the index from the session files at start, so
-with many saved sessions the first `codex resume` of a run can take a moment.
+For Codex, only the two session folders persist. `config.toml`, `hooks.json`,
+the prompt history file `history.jsonl`, logs and Codex's SQLite index stay in
+the throwaway copy. Codex rebuilds the index from the session files at start,
+so with many saved sessions the first `codex resume` of a run can take a
+moment.
+
+For Copilot, only `session-state` persists. `settings.json`, `config.json`, the
+prompt history `command-history-state.json`, logs and the `session-store.db`
+index stay in the throwaway copy.

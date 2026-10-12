@@ -54,7 +54,7 @@ Read a few after a week of normal work. Frequency and recency do the arguing:
 
 To allow a host permanently, add an anchored pattern to one of two files:
 
-    ../proxy/allowlist-common.txt     all three commands
+    ../proxy/allowlist-common.txt     all four commands
     ../proxy/allowlist-<tool>.txt     just that one
 
 Put general-purpose sites in the common file. Keep a tool's own file for its own

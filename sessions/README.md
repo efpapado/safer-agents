@@ -33,7 +33,7 @@ From any folder:
 
     safer-claude --repair
 
-Any of the three commands does the same job. It reads every record here,
+Any of the four commands does the same job. It reads every record here,
 deletes each placeholder that is still empty, removes the marker block from
 each exclude file, and deletes the record. A placeholder with content is kept
 and reported: the agent wrote it, or you did, and it is not the launcher's to

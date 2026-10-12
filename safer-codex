@@ -18,10 +18,11 @@
 #                      current directory. --ro means the same thing
 #      --with-core     mount a Drupal folder READ-ONLY, found by name from the
 #      --with-modules  repository root: <web root>/core, <web root>/modules,
-#      --with-contrib  <web root>/modules/contrib, or the composer vendor
-#      --with-vendor   folder. See section 8b of lib/safer-common.sh
+#      --with-themes   <web root>/themes, <web root>/modules/contrib, or the
+#      --with-contrib  composer vendor folder. See section 8b of
+#      --with-vendor   lib/safer-common.sh
 #      --with-config   the config export folder, read from settings.php
-#      --with-all      core, modules, vendor and config in one flag
+#      --with-all      core, modules, themes, vendor and config in one flag
 #      --with-*-rw     any of the above read-WRITE, for example
 #                      --with-config-rw or --with-all-rw. Confirmed like --rw
 #      --rw PATH       mount a host folder read-WRITE. The agent can change
@@ -125,22 +126,23 @@ source "$SAFER_ROOT/lib/safer-common.sh"
 
 usage() {
     echo "Usage: safer-codex [--add PATH] [--with-core] [--with-modules]"
-    echo "                   [--with-contrib] [--with-vendor] [--with-config]"
-    echo "                   [--with-all] [--with-*-rw] [--rw PATH] [--allow HOST]"
-    echo "                   [--offline] [-- COMMAND ...]"
+    echo "                   [--with-themes] [--with-contrib] [--with-vendor]"
+    echo "                   [--with-config] [--with-all] [--with-*-rw] [--rw PATH]"
+    echo "                   [--allow HOST] [--offline] [-- COMMAND ...]"
     echo "       safer-codex --repair"
     echo "       safer-codex --history | --merge-history"
     echo ""
     echo "  --add PATH      mount a folder READ-ONLY (--ro means the same)"
     echo "  --with-core     mount <web root>/core read-only, found from the"
     echo "  --with-modules  repository root. Likewise <web root>/modules,"
-    echo "  --with-contrib  <web root>/modules/contrib and the composer"
-    echo "  --with-vendor   vendor folder. Saves counting ../ in --add"
+    echo "  --with-themes   <web root>/themes, <web root>/modules/contrib"
+    echo "  --with-contrib  and the composer vendor folder. Saves counting"
+    echo "  --with-vendor   ../ in --add"
     echo "  --with-config   mount the config export folder read-only. Its place"
     echo "                  is read from sites/default/settings.php on your Mac;"
     echo "                  the parent of the sync folder is mounted, so config"
     echo "                  split folders come along"
-    echo "  --with-all      core, modules, vendor and config in one flag"
+    echo "  --with-all      core, modules, themes, vendor and config in one flag"
     echo "  --with-*-rw     any --with flag read-WRITE: --with-config-rw for a"
     echo "                  config export, --with-all-rw for everything. Each"
     echo "                  folder is confirmed like --rw"

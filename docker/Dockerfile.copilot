@@ -1,0 +1,280 @@
+# =============================================================================
+#  Dockerfile.copilot — the image GitHub Copilot CLI runs inside
+# =============================================================================
+#
+#  HOW THIS IMAGE IS BUILT
+#  The safer-copilot command builds it for you, pinning the version to whatever
+#  is installed on your Mac:
+#
+#      cd docker
+#      docker build --build-arg TOOL_VERSION=1.0.91 \
+#                   -f Dockerfile.copilot -t safer-agent-copilot .
+#
+#  -t safer-agent-copilot   names the finished image
+#  .                        the build context: this folder, and only this folder.
+#                           Nothing here is COPYed, so the context exists only to
+#                           be small. Keep it that way
+#
+#  WHY THERE ARE FOUR OF THESE FILES
+#  One per tool, all in this docker/ folder: Dockerfile.claude,
+#  Dockerfile.codex, Dockerfile.opencode and this one. The first three are
+#  nearly identical and differ only in the npm package installed at the end.
+#  This one differs more, and the difference is in the tool, not in the
+#  sandbox:
+#
+#      Copilot CLI is not a Node package. It is ONE native executable with
+#      Node built in. Homebrew installs it that way on your Mac (the cask
+#      copilot-cli downloads copilot-darwin-arm64.tar.gz from the GitHub
+#      release), and this file installs it the same way for Linux. So there is
+#      NO Node.js in this image, and no npm. The agent has no package manager
+#      to reach for, which is one less thing to refuse at the network.
+#
+#  WHAT IS DELIBERATELY MISSING
+#  - git      — version control happens on the host, by hand. See below.
+#  - composer — not installed. The agent edits code; it does not manage
+#               dependencies.
+#  - node     — not needed, see above. A side effect: MCP servers that are
+#               started with `npx` cannot run in this image. Nothing in the
+#               Drupal workflow needs one.
+#  - database drivers — no pdo_mysql, no mysqli. The agent cannot reach a
+#               database even if one were reachable on the network.
+#
+#  The agent can run `php -l` to check syntax, and any test runner that is
+#  already vendored in the mounted project (for example vendor/bin/phpunit).
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+#  Base image
+# -----------------------------------------------------------------------------
+#  Start from Debian "bookworm" with PHP 8.3 command-line already installed.
+#  "cli" means no web server — we only need the `php` binary.
+#
+#  Debian uses glibc, so the plain `copilot-linux-*` release asset is the right
+#  one. The `linuxmusl` assets are for Alpine.
+FROM php:8.3-cli-bookworm
+
+
+# -----------------------------------------------------------------------------
+#  Build argument
+# -----------------------------------------------------------------------------
+#  ARG declares a variable supplied at BUILD time with --build-arg. It is not
+#  available at run time (that would be ENV).
+#
+#  TOOL_VERSION  which version of Copilot CLI to install, so the container
+#                matches the one on your Mac. It is the number `copilot
+#                --version` prints, for example 1.0.91, and it names a release
+#                tag: v1.0.91.
+#
+#                A PRERELEASE build on your Mac (the copilot-cli@prerelease
+#                cask, versions like 1.0.91-1) is not supported: the launcher
+#                reads only the numeric part, and the matching stable tag may
+#                not exist yet. The build then fails at the download step with
+#                a 404. Install the stable cask.
+ARG TOOL_VERSION
+
+
+# -----------------------------------------------------------------------------
+#  System packages, and removing git
+# -----------------------------------------------------------------------------
+#  No git on purpose. The agent reads and edits code; version control stays on
+#  the host. This matters for security, not tidiness: a .git directory holds
+#  hooks and config that execute commands on the HOST later, so an agent that
+#  can write into .git can run code on your Mac after the container is gone.
+#
+#  The php:*-cli images are built on buildpack-deps, which ships git, so it has
+#  to be purged explicitly. The safer-copilot command does the other half of
+#  the job: it hides every .git directory in every mounted folder.
+#
+#  RUN executes a command while building. Everything is chained with `&&` into
+#  ONE RUN so it becomes one layer — and so that the `apt-get purge` runs in
+#  the same layer that installed things. A purge in a *later* layer would not
+#  shrink the image, because the earlier layer still contains the files.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      curl \
+      ripgrep \
+      bubblewrap \
+      libxml2-dev \
+      libonig-dev \
+ && docker-php-ext-install \
+      mbstring \
+      xml \
+ && apt-get purge -y --auto-remove git git-man \
+ && rm -rf /var/lib/apt/lists/*
+#
+#  A note on the packages above:
+#    ca-certificates  the list of trusted certificate authorities. Without it,
+#                     every HTTPS connection fails to verify — including the
+#                     download below.
+#    curl             a command-line HTTP client. Used below to fetch the
+#                     release, and by the agent: it honours the proxy
+#                     environment variables safer-copilot sets, so the agent
+#                     can fetch pages through the allowlist.
+#    ripgrep          fast recursive search. Copilot CLI bundles its own copy
+#                     for its search tool; this one is for the agent's shell.
+#    bubblewrap       Copilot CLI's own optional command sandbox looks for
+#                     `bwrap`. It cannot actually work under our security
+#                     flags (no capabilities, no privilege escalation) — kept
+#                     only so a probe for the binary does not error.
+#    libxml2-dev,
+#    libonig-dev      C libraries needed to COMPILE the two PHP extensions on
+#                     the next line. Not needed at run time, but removing them
+#                     would need a multi-stage build; not worth it here.
+#
+#  docker-php-ext-install compiles and enables a PHP extension. Only two:
+#    mbstring  multi-byte string functions — most PHP code assumes it exists
+#    xml       XML parsing — Drupal and PHPUnit both need it
+#
+#  Note what is NOT here: pdo_mysql, mysqli, pdo_pgsql. That is intentional.
+#  It means Drupal kernel and functional tests cannot run in this container,
+#  and it also means the container has no way to talk to a database even if the
+#  network allowed it.
+
+
+# -----------------------------------------------------------------------------
+#  Assertion: fail the build if git came back
+# -----------------------------------------------------------------------------
+#  Purging git above is not a guarantee — a future package could pull it in as
+#  a dependency without anyone noticing. This line turns that silent regression
+#  into a loud build failure.
+#
+#  `!` inverts the exit status, so this succeeds only when `command -v git`
+#  FAILS, meaning git is genuinely absent. The second test catches the case
+#  where the binary is gone but git's helper programs remain.
+#
+#  If the build stops here, git returned as a dependency. Find out what pulled
+#  it in rather than deleting this check.
+RUN ! command -v git >/dev/null 2>&1 \
+ && [ ! -d /usr/lib/git-core ]
+
+
+# -----------------------------------------------------------------------------
+#  A git shim that explains itself
+# -----------------------------------------------------------------------------
+#  Without this, the agent runs `git status`, sees "command not found", and
+#  reasonably concludes it should install git. It will then waste turns trying.
+#  A tiny script that explains the absence saves that loop.
+#
+#  Copilot CLI itself also looks for git, to find the repository root for its
+#  instruction files and to offer worktrees. With this shim it sees "no git"
+#  and falls back to the working directory, which is what we want.
+#
+#  chmod 0555 = readable and executable by everyone, writable by NOBODY. The
+#  agent runs as a non-root user and the container filesystem is read-only at
+#  run time, so this cannot be replaced from inside.
+#
+#  exit 127 is the conventional "command not found" status, so scripts that
+#  check for git behave as if it is missing.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'echo "git is not available in this sandbox." >&2' \
+      'echo "Version control is handled on the host, outside the container." >&2' \
+      'exit 127' \
+    > /usr/local/bin/git \
+ && chmod 0555 /usr/local/bin/git
+
+
+# -----------------------------------------------------------------------------
+#  Install Copilot CLI
+# -----------------------------------------------------------------------------
+#  This is the last real step on purpose: it is the layer that changes most
+#  often (every time a new version is released), so everything above it stays
+#  cached.
+#
+#  The release publishes one archive per platform plus a SHA256SUMS.txt:
+#
+#      https://github.com/github/copilot-cli/releases/download/v<version>/
+#          copilot-linux-arm64.tar.gz      Apple Silicon Macs run arm64 containers
+#          copilot-linux-x64.tar.gz        Intel Macs run x64 containers
+#          SHA256SUMS.txt
+#
+#  Each archive holds exactly one file, `copilot`, the executable.
+#
+#  WHICH ARCHITECTURE. `dpkg --print-architecture` says what Debian this
+#  image is — arm64 or amd64 — and that is what the running container will
+#  be. GitHub names them arm64 and x64, so amd64 is mapped.
+#
+#  THE CHECKSUM. SHA256SUMS.txt is downloaded from the same release and the
+#  archive is checked against it before it is unpacked. Be honest about what
+#  that proves: both files come from the same place, so this catches a
+#  corrupted or truncated download, not a compromised release. There is no
+#  separate signature to check. It is still worth the two lines — a truncated
+#  178 MB download that happens to unpack is exactly the fault that is
+#  otherwise found a week later.
+#
+#  `set -e` inside the RUN so that a failed step stops the build instead of
+#  leaving a half-installed binary that the next line then "verifies".
+RUN set -e; \
+    case "$(dpkg --print-architecture)" in \
+        arm64) arch=arm64 ;; \
+        amd64) arch=x64 ;; \
+        *) echo "unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    base="https://github.com/github/copilot-cli/releases/download/v${TOOL_VERSION}"; \
+    cd /tmp; \
+    curl -fsSL -o copilot.tar.gz "$base/copilot-linux-${arch}.tar.gz"; \
+    curl -fsSL -o SHA256SUMS.txt "$base/SHA256SUMS.txt"; \
+    grep " copilot-linux-${arch}.tar.gz\$" SHA256SUMS.txt \
+        | sed 's# copilot-linux-.*# copilot.tar.gz#' \
+        | sha256sum -c -; \
+    tar xzf copilot.tar.gz -C /usr/local/bin copilot; \
+    chmod 0555 /usr/local/bin/copilot; \
+    rm -f copilot.tar.gz SHA256SUMS.txt
+
+
+# -----------------------------------------------------------------------------
+#  Unpack the tool's own package once, here, instead of at every start
+# -----------------------------------------------------------------------------
+#  The executable carries its JavaScript, native modules and grammars inside
+#  itself, and on first start it unpacks them — about 180 MB — into a cache
+#  folder, then runs from there. On your Mac that folder is
+#  ~/Library/Caches/copilot/pkg; on Linux it is ~/.cache/copilot/pkg.
+#
+#  Inside the sandbox $HOME is a tmpfs that is thrown away with the container,
+#  so left alone this would mean unpacking 180 MB into memory at every launch.
+#  Instead it is done once at build time, into a folder the executable is told
+#  about through COPILOT_PKG_CACHE_HOME, which it checks FIRST. At run time it
+#  finds the `.extraction-complete` marker there and reads from it without
+#  writing anything — checked in a container with that folder made read-only.
+#
+#  `copilot --version` is the cheapest command that triggers the unpacking. It
+#  needs no network and no login. COPILOT_AUTO_UPDATE=false keeps it from
+#  also looking for a newer release while it is at it.
+#
+#  The ENV line makes the location permanent for the running container.
+#  Everything else about the tool's behaviour at run time — the update check,
+#  the token, the disabled built-in MCP servers — is set by safer-copilot, not
+#  here, so that it is in one place.
+ENV COPILOT_PKG_CACHE_HOME=/opt/copilot-cache
+RUN set -e; \
+    mkdir -p /opt/copilot-cache; \
+    HOME=/tmp/copilot-build COPILOT_AUTO_UPDATE=false copilot --version; \
+    test -f /opt/copilot-cache/pkg/linux-*/"${TOOL_VERSION}"/.extraction-complete; \
+    chmod -R a+rX /opt/copilot-cache; \
+    rm -rf /tmp/copilot-build
+
+
+# -----------------------------------------------------------------------------
+#  Assertion: the installed version is the requested one
+# -----------------------------------------------------------------------------
+#  `copilot --version` prints "GitHub Copilot CLI 1.0.91." — the version the
+#  launcher compares against your Mac's. If the release archive ever carried a
+#  different number than its tag, the launcher would rebuild this image on
+#  every run and never say why. Catch it here instead.
+RUN copilot --version | grep -F " ${TOOL_VERSION}."
+
+
+# -----------------------------------------------------------------------------
+#  Default command
+# -----------------------------------------------------------------------------
+#  What runs if `docker run` is given no command. safer-copilot always passes
+#  one explicitly, so this is only a fallback for poking at the image by hand:
+#  `docker run --rm -it safer-agent-copilot`
+#
+#  Note there is no USER instruction here. safer-copilot passes --user with
+#  YOUR user id at run time instead, so files the agent creates in a mounted
+#  folder belong to you and not to root.
+CMD ["bash"]
