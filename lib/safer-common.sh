@@ -434,6 +434,15 @@ cleanup() {
     #     as a new dangerous file, which is the opposite of useful.
     report_new_dangerous_paths || true
 
+    # --- 5c. Let the command save what it wants to keep ---------------------
+    #
+    #     A command may define safer_tool_exit. It runs here, while the
+    #     throwaway copy still exists. safer-claude uses it to keep the
+    #     sandbox's renewed login token between runs.
+    if declare -F safer_tool_exit >/dev/null; then
+        safer_tool_exit || true
+    fi
+
     # --- 6. Remove temporary files ----------------------------------------
     if [[ -n "$SCRATCH_DIR" ]]; then
         rm -rf "$SCRATCH_DIR" || true
@@ -1373,9 +1382,14 @@ safer_protect_paths() {
 #  `safer-<tool> --repair` reads every record in sessions/, deletes each
 #  placeholder that is still empty, removes the marker block from each exclude
 #  file, and then deletes the record. It uses the SAME functions as cleanup,
-#  so it can never do more than cleanup would have done. It needs no Docker
-#  and no project folder. Every launch also runs it first, so a single new run
-#  of any tool, in any project, heals what an earlier one left behind.
+#  so it can never do more than cleanup would have done. It needs no project
+#  folder. Every launch also runs it first, so a single new run of any tool,
+#  in any project, heals what an earlier one left behind.
+#
+#  It then removes what a dead run left OUTSIDE the project: the generated
+#  config files in proxy/, and the gatekeeper, forwarder and network in
+#  Docker. Those need no record, because each carries the run's process id in
+#  its name. See repair_stale_runtime. Docker is optional for that step.
 #
 #  WHAT A LIVE RUN LOOKS LIKE
 #  You may run safer-claude in one project while safer-codex runs in another.
@@ -1426,6 +1440,8 @@ write_session_record() {
         echo "# ignore rules between the two marker lines in the exclude file, and then"
         echo "# deletes this record. A placeholder with content is left alone and"
         echo "# reported: the agent wrote it, or you did, and it is not ours to delete."
+        echo "# It also removes the run's generated files in proxy/ and its containers"
+        echo "# and network in Docker; those carry the process id in their names."
         echo "# The next launch of any safer-* command does the same repair on its own."
         echo "#"
         echo "# The lines below are what --repair reads. One fact per line: a keyword,"
@@ -1517,6 +1533,19 @@ repair_stale_sessions() {
     local key rest path pid tool started project exclude
     local removed kept understood
 
+    # Never from inside a container. The liveness check reads the host's
+    # process table, and a container cannot see it: every record, file and
+    # network would look dead, and the repair would strip a RUNNING session.
+    # The launcher folder is not meant to be mounted, but this is cheap and
+    # the mistake is not.
+    if [[ -f /.dockerenv ]]; then
+        echo "Refusing to repair from inside a container: the host's processes are" >&2
+        echo "not visible here, so a live session would be mistaken for a dead one." >&2
+        echo "Run safer-$TOOL --repair on the host." >&2
+        [[ "$mode" == "launch" ]] && return 0
+        return 1
+    fi
+
     if [[ ! -d "$SESSIONS_DIR" ]]; then
         [[ "$mode" == "launch" ]] || echo "Nothing to repair: no session records."
         return 0
@@ -1602,6 +1631,110 @@ repair_stale_sessions() {
         echo "Nothing to repair: every session record belongs to a run that is still active,"
         echo "or there are none."
     fi
+
+    # The things a dead run leaves OUTSIDE the project. Not in the record,
+    # because each one carries the run's process id in its own name.
+    repair_stale_runtime "$mode"
+}
+
+# ---------------------------------------------------------------------------
+#  Remove what a dead run left outside the project.
+#
+#  The session record covers the project folder. But a run also leaves three
+#  things that live elsewhere, and all three carry the launcher's process id
+#  in their name, so no record is needed to find them:
+#
+#      proxy/.allowlist.effective.<tool>.<pid>     the merged allowlist
+#      proxy/.ollama.effective.<pid>.conf          the forwarder rules
+#      Docker:  safer-<tool>-proxy-<pid>           the gatekeeper container
+#               safer-<tool>-ollama-<pid>          the Ollama forwarder
+#               safer-<tool>-net-<pid>             the sealed network
+#
+#  The liveness check is the same one the record repair uses: a process id
+#  that is taken by a running safer-* command belongs to a live session, and
+#  its files and containers stay. Docker is optional here. A box without it
+#  still gets the files cleaned, and `--repair` says what it could not check.
+#
+#  $1  "launch": silent unless something was removed. Anything else: the
+#      `--repair` command, which always says what it found.
+# ---------------------------------------------------------------------------
+repair_stale_runtime() {
+    local mode="${1:-command}"
+    local f name pid found=0
+
+    # --- 1. The generated config files in proxy/ ---------------------------
+    for f in "$PROXY_DIR"/.allowlist.effective.*.* \
+             "$PROXY_DIR"/.ollama.effective.*.conf; do
+        [[ -f "$f" ]] || continue
+        pid="$(runtime_pid "$(basename "$f")")"
+        [[ -n "$pid" ]] || continue
+        if session_is_live "$pid"; then
+            [[ "$mode" == "launch" ]] \
+                || echo "Skipping $(basename "$f"): its run is still active (pid $pid)."
+            continue
+        fi
+        found=1
+        rm -f "$f" && echo "Removed stale file: $f"
+    done
+
+    # --- 2. The containers and networks ------------------------------------
+    #
+    #     `docker ps -a` lists stopped containers too; a gatekeeper that died
+    #     with its run is one. The network must go last: Docker refuses to
+    #     remove a network while a container is still attached to it.
+    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        [[ "$mode" == "launch" ]] \
+            || echo "Docker is not reachable, so stale containers and networks were not checked."
+        return 0
+    fi
+
+    while read -r name; do
+        [[ -n "$name" ]] || continue
+        pid="$(runtime_pid "$name")"
+        [[ -n "$pid" ]] || continue
+        if session_is_live "$pid"; then
+            [[ "$mode" == "launch" ]] \
+                || echo "Skipping container $name: its run is still active (pid $pid)."
+            continue
+        fi
+        found=1
+        docker rm -f "$name" >/dev/null 2>&1 && echo "Removed stale container: $name"
+    done < <(docker ps -a --format '{{.Names}}' 2>/dev/null \
+             | grep -E '^safer-[a-z]+-(proxy|ollama)-[0-9]+$' || true)
+
+    while read -r name; do
+        [[ -n "$name" ]] || continue
+        pid="$(runtime_pid "$name")"
+        [[ -n "$pid" ]] || continue
+        if session_is_live "$pid"; then
+            [[ "$mode" == "launch" ]] \
+                || echo "Skipping network $name: its run is still active (pid $pid)."
+            continue
+        fi
+        found=1
+        docker network rm "$name" >/dev/null 2>&1 && echo "Removed stale network: $name"
+    done < <(docker network ls --format '{{.Name}}' 2>/dev/null \
+             | grep -E '^safer-[a-z]+-net-[0-9]+$' || true)
+
+    if [[ "$found" -eq 0 && "$mode" != "launch" ]]; then
+        echo "No stale files, containers or networks."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  The process id in the name of a generated file, container or network.
+#
+#  Every such name ends in the id, or in the id followed by ".conf". Prints
+#  the id, or nothing when the name has no such ending, so the caller can
+#  skip a name it does not understand instead of guessing.
+# ---------------------------------------------------------------------------
+runtime_pid() {
+    local name="${1%.conf}"
+    name="${name##*[^0-9]}"
+    if [[ "$name" =~ ^[0-9]+$ ]]; then
+        echo "$name"
+    fi
+    return 0    # an empty answer is an answer; `set -e` must not see a failure
 }
 
 

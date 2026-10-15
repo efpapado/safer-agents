@@ -40,6 +40,7 @@
 ^code\.claude\.com$
 ^claude\.com$
 
-#  Only needed if a login is ever attempted INSIDE the container. You log in on
-#  the host, so normally this stays off.
+#  The login page, for /login inside the sandbox. The sandbox has its own login,
+#  kept in history/claude/credentials.json, and this is how you make it the
+#  first time. Needed; see seed_credentials() in safer-claude.
 ^claude\.ai$

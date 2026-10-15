@@ -78,6 +78,7 @@ RUN apt-get update \
       curl \
       ripgrep \
       bubblewrap \
+      procps \
       libxml2-dev \
       libonig-dev \
  && docker-php-ext-install \
@@ -97,6 +98,11 @@ RUN apt-get update \
 #                     It cannot actually work under our security flags (no
 #                     capabilities, no privilege escalation) — kept only so the
 #                     agent does not error on a missing binary.
+#    procps           provides `ps`. Codex starts a background "app server"
+#                     and runs `ps` to record its process. Without `ps`, Codex
+#                     stops at start with "failed to invoke ps for pid-managed
+#                     app server: No such file or directory". `ps` only reads
+#                     the container's own /proc, so it exposes nothing new.
 #    libxml2-dev,
 #    libonig-dev      C libraries needed to COMPILE the two PHP extensions on
 #                     the next line. Not needed at run time, but removing them

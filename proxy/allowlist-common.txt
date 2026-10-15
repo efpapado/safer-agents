@@ -84,6 +84,7 @@
 #  worth removing.
 ^api\.drupal\.org$
 ^www\.drupal\.org$
+^new\.drupal\.org$
 
 # -----------------------------------------------------------------------------
 #  ANTHROPIC DOCUMENTATION

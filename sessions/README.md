@@ -43,6 +43,13 @@ Every launch of any command runs the same repair first, so a normal new run
 also heals what an earlier one left. A record whose run is still active is
 skipped, so two sessions in two projects do not disturb each other.
 
+The repair then looks outside the project. A dead run also leaves its merged
+allowlist and forwarder rules in `../proxy/`, and its gatekeeper, forwarder
+and network in Docker. None of these is in the record, because each carries
+the run's process id in its name. The repair removes every one whose process
+is gone. Without Docker, it removes the files and says that it could not check
+the containers.
+
 ## Why here
 
 The record must outlive the run, be found by a later run of a **different**

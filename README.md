@@ -71,7 +71,7 @@ The first is the easy one. Most of this project is the other two.
 
 | | |
 |---|---|
-| macOS | This is what it is built and tested for. It uses the login Keychain to seed credentials, and Docker Desktop's path sharing. |
+| macOS | This is what it is built and tested for. It reads the login Keychain once, to start the sandbox's own login, and uses Docker Desktop's path sharing. |
 | Docker Desktop | Running. The commands build their own images and never download one. |
 | Bash | The commands run under `bash`, not `sh`. The stock macOS `/bin/bash` is enough — they avoid bash 4 syntax on purpose. |
 | The agent itself, installed on your Mac | `claude`, `codex`, `opencode` or `copilot` must be on your `PATH`. The launcher reads its version and builds an image with the same one, so the sandbox matches what you use. |
@@ -493,12 +493,30 @@ agent can write `.gitignore`.
 
 ## Logging in
 
-`safer-claude` seeds the token from your macOS Keychain, so a session starts
-authenticated. Renewal happens inside the container and is discarded at exit;
-your Keychain is never reachable from the container.
+`safer-claude` gives the sandbox its own login, separate from your Mac's. The
+token lives in `history/claude/credentials.json` inside the launcher folder.
+Each run seeds it from there, and saves the renewed token back at exit. You
+log in once, inside the sandbox; after that a run starts authenticated, also
+after a quit and a relaunch later in the day.
 
-If no token is found, run `/login` inside the sandbox. There is no browser in
-the image, so use the manual code paste.
+The first run, or a run after you delete that file, seeds from your macOS
+Keychain instead. If Claude Code still asks for a login, do it once: run
+`/login` inside the sandbox. There is no browser in the image, so use the
+manual code paste. The result is saved at exit.
+
+Why not the Keychain every time: a token renews about every eight hours, and
+a renewal makes the old refresh token useless. A renewal inside the sandbox
+left the Keychain with a dead token, so every run needed a new login. The
+sandbox's own file fixes that. Your Keychain is read once and never written,
+and it is never reachable from the container.
+
+Several sandboxes at once share that one token, like two Claude Code windows
+on your Mac share one Keychain entry. At exit the newest token wins, so a
+sandbox that did not renew cannot overwrite one that did. Only a session of
+over eight hours renews at all. If two such sessions run side by side, the
+second renewal can fail; that costs one `/login`. A sandbox killed with
+`kill -9` loses its renewal; the next run uses the older token, which usually
+still renews.
 
 `safer-copilot` also seeds a token from the Keychain, but not the one
 `copilot login` stores. That is an OAuth token with the `repo` and `gist`
@@ -556,6 +574,8 @@ proxy/ollama.conf             the forwarder's default-deny rules
 connection_logs/              <tool>-<timestamp>.log, the newest 30 per tool
 connection_logs/README.md     how to read them
 
+history/claude/credentials.json  the sandbox's own Claude login, renewed at
+                              the end of every run. See "Logging in".
 history/codex/<module slug>/  Codex and Copilot session history, one folder
 history/copilot/<module slug>/  per module. Ignored by git, apart from the
 history/README.md             README.
@@ -610,7 +630,8 @@ the explanations are where the code is.
 | `proxy/ollama.conf` | Which Ollama endpoints are permitted, and which are refused. |
 | `connection_logs/README.md` | How to read a log, how to decide whether to allow a host, and what the logs cannot tell you. |
 | `connection_logs/*.log` | What each run tried to reach and what appeared in your project. |
-| `history/README.md` | Where Codex and Copilot session history is kept, why it is here, and how to list, merge or delete it. |
+| `history/README.md` | Where Codex and Copilot session history and the sandbox's Claude login are kept, why they are here, and how to list, merge or delete them. |
+| `safer-claude` | Why the sandbox has its own login instead of using the Keychain each time, and how several sandboxes share it. |
 
 ---
 
@@ -623,7 +644,8 @@ These are recorded properly in the files that own them; this is the short list.
 - Settings changed inside the sandbox do not persist. That is the config
   strategy working, not a bug.
 - `opencode` session history is per-session and disappears with the container.
-  `safer-claude` keeps this project's transcript in `~/.claude/projects`.
+  `safer-claude` keeps this project's transcript in `~/.claude/projects` and
+  the sandbox's login in `history/claude/credentials.json`.
   `safer-codex` keeps this module's sessions in `history/codex/` inside the
   launcher folder, so `codex resume` works across runs. Your native Codex does
   not see them until you run `safer-codex --merge-history`. The prompt history
@@ -651,8 +673,9 @@ These are recorded properly in the files that own them; this is the short list.
   the exit scan does not run. Each run writes a record of both to `sessions/`
   before it starts, and deletes it when it ends normally. Run
   `safer-claude --repair` (any of the four commands) to undo what a dead run
-  left, or just launch again: every launch does the same repair first. See
-  `sessions/README.md`.
+  left, or just launch again: every launch does the same repair first. The
+  repair also removes the dead run's generated files in `proxy/` and its
+  containers and network in Docker. See `sessions/README.md`.
 - No database driver, so Drupal kernel and functional tests cannot run in the
   sandbox. `php -l` and unit tests work; everything else is a host job.
 - No composer and no drush. The agent cannot add a dependency, apply a patch or

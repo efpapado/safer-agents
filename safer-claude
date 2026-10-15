@@ -34,7 +34,8 @@
 #      --offline       no network at all (the agent cannot reach the model API,
 #                      so this is only useful with `-- bash` for local analysis)
 #      --repair        finish the cleanup of a run that died without its exit
-#                      trap (kill -9, power loss), then stop. No container.
+#                      trap (kill -9, power loss): placeholders, ignore rules,
+#                      generated files, containers, network. Then stop.
 #                      See sessions/README.md
 #      -- COMMAND      run COMMAND instead of claude
 #
@@ -70,6 +71,14 @@
 #
 #  SESSION HISTORY: this project's transcript persists, because Claude Code
 #  stores transcripts per project and only this project's folder is shared.
+#
+#  LOGIN: the sandbox has its own login, separate from your Mac's. It is kept in
+#
+#      <launcher folder>/history/claude/credentials.json
+#
+#  and renewed there at the end of every run. You log in once, inside the
+#  sandbox; after that a run starts authenticated. See seed_credentials() and
+#  save_credentials() below for why the Keychain alone could not do this.
 # =============================================================================
 
 set -euo pipefail
@@ -122,7 +131,8 @@ usage() {
     echo "  --effort LEVEL  low | medium | high | xhigh | max"
     echo "  --offline       no network at all"
     echo "  --repair        undo what a run killed with kill -9 left behind,"
-    echo "                  then stop. No container. See sessions/README.md"
+    echo "                  in the project and in Docker, then stop."
+    echo "                  See sessions/README.md"
     echo ""
     echo "The folder you run in is always read-write. Inside every mounted"
     echo "folder, .git and the paths in dangerous-paths.txt are covered so"
@@ -152,6 +162,11 @@ CFG_CONT="/home/agent/.claude"           # inside the container
 # Where macOS keeps the token. Confirm the name on your Mac with:
 #     security find-generic-password -s "Claude Code-credentials" -w
 KEYCHAIN_SERVICE="Claude Code-credentials"
+
+# The sandbox's own token, kept between runs. Inside the launcher folder, so
+# --add and --rw refuse it, and ignored by git like the rest of history/.
+# See seed_credentials() and save_credentials() below.
+CRED_STORE="$HISTORY_DIR/claude/credentials.json"
 
 # The config folder is NOT mounted directly. See build_config() below.
 #
@@ -192,26 +207,54 @@ add_copy "$HOME/.claude.json" "/home/agent/.claude.json"
 # ---------------------------------------------------------------------------
 #  Seed the token for the sandbox.
 #
-#  On macOS the live token is in the login Keychain. ~/.claude/.credentials.json
-#  is the LINUX location: on a Mac it is either absent, or a stale leftover from
-#  an earlier container login. Seeding from that file is what made the sandbox
-#  report an expired token, and what made a /login on the host fail to help —
-#  a host login updates the Keychain, which that file never sees.
+#  THE SANDBOX HAS ITS OWN LOGIN, SEPARATE FROM YOUR MAC'S
 #
-#  So read the Keychain first, fall back to the file, then give up and let
-#  Claude Code ask. Whatever lands here is a throwaway copy; see build_config().
+#  The first version of this launcher copied the token from the Keychain at
+#  every start, and that forced a /login at every start. The reason is how a
+#  token renews. An access token lasts about eight hours. When Claude Code
+#  renews it, the server hands out a new refresh token, and the old refresh
+#  token stops working. The renewal ran inside the sandbox, in the throwaway
+#  copy, so the Keychain kept the OLD refresh token — dead from the first
+#  sandbox renewal on. Every later start seeded a dead token, the renewal
+#  failed, and Claude Code asked for a login.
+#
+#  So the sandbox keeps its own token, in $CRED_STORE. Order at start:
+#
+#    1. $CRED_STORE, when it holds a usable token;
+#    2. else the Keychain, once, as a starter. If that token is already dead,
+#       Claude Code asks for one login, and the result is saved at exit;
+#    3. else ~/.claude/.credentials.json, the Linux location, usually absent
+#       on a Mac;
+#    4. else nothing: run /login inside the sandbox, once.
+#
+#  The Keychain is read, never written. Your Mac's own Claude Code keeps its
+#  own login, and the two never rotate each other's token.
+#
+#  Whatever lands here is a throwaway copy inside the container; see
+#  build_config(). save_credentials() copies the renewed token back out.
 # ---------------------------------------------------------------------------
 seed_credentials() {
     local dest="$CUR_BASE/.credentials.json"
+
+    if token_file_ok "$CRED_STORE"; then
+        cp "$CRED_STORE" "$dest"
+        chmod 0600 "$dest"
+        echo "Login: the sandbox's own token, $(token_expiry_note "$dest")."
+        return 0
+    fi
+
+    if [[ -e "$CRED_STORE" ]]; then
+        echo "Login: $CRED_STORE is not a usable token; ignored."
+    fi
 
     # `security` exists only on macOS, so Linux skips straight to the file.
     if command -v security >/dev/null 2>&1 \
        && seed_in .credentials.json \
               security find-generic-password -s "$KEYCHAIN_SERVICE" -w
     then
-        # Cheap shape check. grep -q prints nothing, so the token stays unseen.
-        if grep -q claudeAiOauth "$dest"; then
-            echo "Login: seeded from the Keychain."
+        if token_file_ok "$dest"; then
+            echo "Login: seeded from the Keychain as a starter. If Claude Code asks"
+            echo "       for a login anyway, do it once. The sandbox keeps the result."
             return 0
         fi
 
@@ -225,7 +268,105 @@ seed_credentials() {
         return 0
     fi
 
-    echo "Login: no token found. Run /login inside the sandbox."
+    echo "Login: no token found. Run /login inside the sandbox, once."
+}
+
+# ---------------------------------------------------------------------------
+#  Read the expiry out of a token file: the "expiresAt" value, in milliseconds
+#  since 1970. Prints nothing when the file has none.
+#
+#  sed rather than a JSON parser: the file is one line written by Claude Code,
+#  and the launcher must not depend on python or jq being on your Mac. Only the
+#  number is printed; the token itself never reaches the terminal.
+# ---------------------------------------------------------------------------
+token_expiry() {
+    sed -n 's/.*"expiresAt":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$1" 2>/dev/null \
+        | head -n 1
+}
+
+# "expires in 5 h 12 min" or "expired 3 h ago", for the startup line.
+token_expiry_note() {
+    local ms now diff
+    ms="$(token_expiry "$1")"
+    now="$(date +%s)"
+    diff=$(( ms / 1000 - now ))
+
+    if (( diff >= 0 )); then
+        echo "expires in $(( diff / 3600 )) h $(( diff % 3600 / 60 )) min"
+    else
+        echo "expired $(( -diff / 3600 )) h ago, Claude Code renews it"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  Is this a token file the sandbox can use?
+#
+#  A cheap shape check, not a validation of the token: a plain file, small,
+#  with the keys Claude Code writes and a numeric expiry. It runs on every
+#  source before seeding AND on the sandbox's file before saving. The second
+#  use is the one that matters: at exit, that file is agent output.
+#
+#  NO SYMLINKS, deliberately. The copy out runs on your Mac. A link the agent
+#  planted inside the container would be followed on your Mac's filesystem,
+#  which would copy any file of yours into the store, and from there into the
+#  next sandbox. `-L` refuses the link; `-f` after it means a real file.
+# ---------------------------------------------------------------------------
+token_file_ok() {
+    local f="$1"
+
+    [[ ! -L "$f" && -f "$f" ]]            || return 1
+    [[ "$(wc -c < "$f")" -lt 65536 ]]     || return 1   # a real one is < 1 KB
+    grep -q '"claudeAiOauth"' "$f"        || return 1
+    grep -q '"accessToken"'   "$f"        || return 1
+    grep -q '"refreshToken"'  "$f"        || return 1
+    [[ -n "$(token_expiry "$f")" ]]
+}
+
+# ---------------------------------------------------------------------------
+#  Save the sandbox's token at exit. cleanup() in the shared library calls
+#  safer_tool_exit, below, before it deletes the throwaway copy.
+#
+#  NEWEST WINS. Several sandboxes run at once, and they all start from the same
+#  token. One of them may renew during the day; the others keep the old token.
+#  If each exit simply overwrote the store, the last one out could put the old
+#  token over the new one. So the store is replaced only when the sandbox's
+#  expiry is later than the store's. Equal means the same token: nothing to do.
+#
+#  A sandbox killed with kill -9 never reaches this point. A renewal it made is
+#  lost, and the next start uses the older token in the store. That one usually
+#  still renews; if not, /login once.
+#
+#  Two sandboxes that BOTH renewed and exit in the same second can still leave
+#  the older of the two renewals behind. That needs two sessions of over eight
+#  hours ending together; the cost is one /login.
+# ---------------------------------------------------------------------------
+save_credentials() {
+    local src="${CUR_BASE:-}/.credentials.json"
+    local new old tmp
+
+    [[ -n "${CUR_BASE:-}" ]]  || return 0
+    token_file_ok "$src"      || return 0
+
+    new="$(token_expiry "$src")"
+    if token_file_ok "$CRED_STORE"; then
+        old="$(token_expiry "$CRED_STORE")"
+        [[ "$new" -gt "$old" ]] || return 0
+    fi
+
+    mkdir -p "$(dirname "$CRED_STORE")"
+    chmod 0700 "$(dirname "$CRED_STORE")"
+
+    # Write beside the store and rename, so another sandbox exiting at the same
+    # moment never reads a half-written file.
+    tmp="$CRED_STORE.$$"
+    cp "$src" "$tmp"
+    chmod 0600 "$tmp"
+    mv -f "$tmp" "$CRED_STORE"
+    echo "Login: renewed token saved for the next run."
+}
+
+safer_tool_exit() {
+    save_credentials
 }
 
 
@@ -254,10 +395,11 @@ build_config() {
     # because the token can never be renewed.
     #
     # Read-only is not the thing protecting your Mac; the copy is. Neither your
-    # Keychain nor your file is reachable from the container, so whatever the
-    # agent writes here dies with the session. Reading the token stays possible,
-    # and what makes a read harmless is the network, which gives a stolen token
-    # nowhere to go.
+    # Keychain nor your file is reachable from the container. What the agent
+    # writes here goes one place only: through the shape check in
+    # save_credentials(), into the sandbox's own token file, and from there
+    # into the next sandbox. Reading the token stays possible, and what makes a
+    # read harmless is the network, which gives a stolen token nowhere to go.
     seed_credentials
 
     # Your own commands, subagents, skills and instructions, so the sandbox

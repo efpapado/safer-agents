@@ -32,7 +32,8 @@
 #      --offline       no network at all (the agent cannot reach the model API,
 #                      so this is only useful with `-- bash` for local analysis)
 #      --repair        finish the cleanup of a run that died without its exit
-#                      trap (kill -9, power loss), then stop. No container.
+#                      trap (kill -9, power loss): placeholders, ignore rules,
+#                      generated files, containers, network. Then stop.
 #                      See sessions/README.md
 #      -- COMMAND      run COMMAND instead of copilot
 #
@@ -254,7 +255,8 @@ usage() {
     echo "  --allow HOST    allow one extra destination for this run only"
     echo "  --offline       no network at all"
     echo "  --repair        undo what a run killed with kill -9 left behind,"
-    echo "                  then stop. No container. See sessions/README.md"
+    echo "                  in the project and in Docker, then stop."
+    echo "                  See sessions/README.md"
     echo ""
     echo "  --history       list the saved sandbox sessions per module. No container."
     echo ""

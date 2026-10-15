@@ -11,6 +11,16 @@ The slug is the module's full path with every character that is not a letter or
 digit replaced by a dash — the same name Claude Code uses under
 `~/.claude/projects`. One folder per module, created on the first run there.
 
+One more file lives here, for Claude Code:
+
+    history/claude/credentials.json
+
+That is the sandbox's own login token, shared by every `safer-claude` run
+regardless of module. The launcher seeds the container from it at start and
+saves the renewed token back at exit; the newest token wins. It is a secret:
+mode 0600, in a folder of mode 0700. Delete it to log the sandbox out. The
+reason it exists is written in `seed_credentials()` in `safer-claude`.
+
 Everything under this folder except this file is ignored by git. The rule lives
 in the repository's `.gitignore`, which is never mounted into a container, so
 the agent cannot change it.
@@ -61,6 +71,11 @@ To forget one module's history, delete its folder:
 
     rm -r history/codex/<module slug>
     rm -r history/copilot/<module slug>
+
+To log the Claude sandbox out, delete its token. The next run seeds from the
+Keychain again, or asks for `/login`:
+
+    rm history/claude/credentials.json
 
 ## Moving to a new Mac
 

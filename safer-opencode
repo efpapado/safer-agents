@@ -35,7 +35,8 @@
 #      --offline       no network at all (the agent cannot reach any model, so
 #                      this is only useful with `-- bash` for local analysis)
 #      --repair        finish the cleanup of a run that died without its exit
-#                      trap (kill -9, power loss), then stop. No container.
+#                      trap (kill -9, power loss): placeholders, ignore rules,
+#                      generated files, containers, network. Then stop.
 #                      See sessions/README.md
 #      -- COMMAND      run COMMAND instead of opencode
 #
@@ -104,7 +105,8 @@ usage() {
     echo "  --ollama        reach the Ollama server on your Mac, inference only"
     echo "  --offline       no network at all"
     echo "  --repair        undo what a run killed with kill -9 left behind,"
-    echo "                  then stop. No container. See sessions/README.md"
+    echo "                  in the project and in Docker, then stop."
+    echo "                  See sessions/README.md"
     echo ""
     echo "The folder you run in is always read-write. Inside every mounted"
     echo "folder, .git and the paths in dangerous-paths.txt are covered so"
