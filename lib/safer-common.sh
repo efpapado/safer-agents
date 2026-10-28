@@ -300,9 +300,9 @@ GIT_MASKS_SEEN=$'\n'   # a newline-delimited string used as a crude "set", to
 PATH_PINS=()           # --mount arguments from dangerous-paths.txt
 PATH_PINS_SEEN=$'\n'   # the same crude "set", for those
 PREEMPTED_PATHS=()     # host paths that did NOT exist when we covered them.
-                       # Docker creates each one on your Mac to have something
-                       # to mount on. Cleanup deletes them again. See the
-                       # "residue" note in section 7.
+                       # The launcher creates each one on your Mac, empty, so
+                       # Docker has something to mount on. Cleanup deletes
+                       # them again. See the "residue" note in section 7.
 PREEMPTED_FILES=()     # the subset of PREEMPTED_PATHS that are FILES. Only
                        # these are visible to git — `git status` does not
                        # report an empty folder — so only these are hidden
@@ -453,7 +453,8 @@ cleanup() {
 #  Delete the empty files and folders Docker created as mount points.
 #
 #  Section 7 pre-empts a dangerous path that is absent: it mounts a placeholder
-#  where the file or folder would go. Docker creates that destination, and the
+#  where the file or folder would go. The launcher creates that destination
+#  itself (see add_path_pin for why Docker cannot be left to do it), and the
 #  destination is in a folder bound from your Mac. So the run leaves an empty
 #  .envrc, .gitlab-ci.yml, .mcp.json and similar in your project, and git shows
 #  them as new files.
@@ -844,18 +845,44 @@ add_path_pin() {
     # making sure none can be created.
     #
     #  A placeholder for an ABSENT path has a cost. Docker must have something
-    #  to mount on, so it creates the destination. The destination is inside a
-    #  folder bound from your Mac, so the empty file or folder appears in your
-    #  project, and `git status` reports it. Record it here; cleanup deletes it
-    #  after the session, but only while it is still empty.
+    #  to mount on, so the destination has to exist. The destination is inside
+    #  a folder bound from your Mac, so the empty file or folder appears in
+    #  your project, and `git status` reports it. Record it here; cleanup
+    #  deletes it after the session, but only while it is still empty.
+    #
+    #  The launcher creates that empty file or folder ITSELF, right here,
+    #  rather than leaving it to Docker. Docker Desktop for Mac fails when
+    #  runc has to create a FILE mount point on a VirtioFS share:
+    #
+    #      create mountpoint for <project>/.envrc mount: mountpoint
+    #      "/run/host_virtiofs/<project>/.envrc" is outside of rootfs
+    #
+    #  With the file already there, runc skips that step and the mount works.
+    #  Same bug and same cure as the one noted in ro_back; see docker/for-mac
+    #  issue 7853. Folders are created too, for the same reason, and because
+    #  it keeps one rule: what cleanup removes is what the launcher made.
+    #
+    #  The parent always exists: pass 2 of pin_dangerous_paths_in_tree walks
+    #  up to the topmost missing component before calling here. So this is one
+    #  file or one folder, never a chain. If docker fails to start, the exit
+    #  trap still runs and removes it again.
     if [[ ! -e "$host" ]]; then
         PREEMPTED_PATHS+=("$host")
         # The FILE placeholders are also hidden from `git status` while the
         # session runs — see hide_placeholders_from_git. Folders are not
         # recorded for that: git never reports an empty folder, and a rule
         # that hides nothing today could hide something after a crash.
-        if [[ "$type" != "dir" ]]; then
+        if [[ "$type" == "dir" ]]; then
+            mkdir "$host" || {
+                echo "Error: cannot create placeholder folder $host" >&2
+                exit 1
+            }
+        else
             PREEMPTED_FILES+=("$host")
+            : > "$host" || {
+                echo "Error: cannot create placeholder file $host" >&2
+                exit 1
+            }
         fi
     fi
 
@@ -1065,11 +1092,12 @@ pin_dangerous_paths_in_tree() {
         fi
 
         # Any other multi-component entry, such as .github/workflows, needs its
-        # parent to exist. If it does not, mounting there would make Docker
-        # create the missing PARENT folder ON YOUR MAC, inside your project. So
-        # cover the topmost missing component instead, as a directory. Docker
-        # then creates that one component and nothing under it, and cleanup
-        # deletes it again — see remove_preempted_residue in section 3.
+        # parent to exist. If it does not, mounting there would need the
+        # missing PARENT folder created ON YOUR MAC, inside your project. So
+        # cover the topmost missing component instead, as a directory.
+        # add_path_pin then creates that one component and nothing under it,
+        # and cleanup deletes it again — see remove_preempted_residue in
+        # section 3.
         #
         # Nothing is lost by doing that: the folder does not exist, so it has no
         # contents to hide. And it is the stronger control — the agent cannot
@@ -1360,7 +1388,7 @@ safer_protect_paths() {
 #
 #  WHY THIS EXISTS
 #  Section 7 leaves two things on your Mac for the length of a session: the
-#  empty placeholders that Docker creates as mount points, and the block of
+#  empty placeholders it creates as mount points, and the block of
 #  ignore rules in .git/info/exclude that hides them. Cleanup removes both.
 #  But cleanup runs from the EXIT trap, and `kill -9`, a power loss or a
 #  terminal killed hard skip the trap. The launcher knew the list of
@@ -2930,6 +2958,24 @@ ro_back() {
         [[ -e "$CUR_HOST/$name" ]] || continue
         check_mount_path "$CUR_HOST/$name"
         check_mount_path "$CUR_CONT/$name"
+
+        # A FILE bound inside the throwaway copy needs its mount point to exist
+        # before Docker starts. Docker Desktop for Mac otherwise fails with:
+        #
+        #     create mountpoint for /home/agent/.claude/CLAUDE.md mount:
+        #     mountpoint "/run/host_virtiofs/.../run.XXXXXX/claude/CLAUDE.md"
+        #     is outside of rootfs
+        #
+        # runc creates the empty file itself, on the VirtioFS share, then checks
+        # its real path, which starts with /run/host_virtiofs, and refuses it.
+        # When the file already exists, runc skips that step and the mount
+        # works. Folders are not affected. Seen on Docker Desktop 4.59 to 4.67
+        # and again on 4.96.2; see docker/for-mac issue 7853. The placeholder
+        # is hidden under the mount and dies with the scratch folder.
+        if [[ -f "$CUR_HOST/$name" ]]; then
+            : > "$CUR_BASE/$name"
+        fi
+
         CONFIG_MOUNTS+=(--mount "type=bind,src=$CUR_HOST/$name,dst=$CUR_CONT/$name,readonly")
 
         # Remember it, so section 7 can hide any .git inside. Read-only is not

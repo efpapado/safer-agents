@@ -95,7 +95,8 @@
 #       that never had one has achieved exactly what the list is meant to stop.
 #
 #       Step 2 has a visible side effect. Docker must have something to mount
-#       on, so it creates the empty file or folder in your project on the Mac.
+#       on, so the launcher creates the empty file or folder in your project
+#       on the Mac before the container starts.
 #       So that `git status` in another terminal does not report each one as a
 #       new file, the launcher lists the file placeholders in .git/info/exclude
 #       for the duration of the run. See hide_placeholders_from_git in
