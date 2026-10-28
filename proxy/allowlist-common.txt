@@ -85,6 +85,7 @@
 ^api\.drupal\.org$
 ^www\.drupal\.org$
 ^new\.drupal\.org$
+^git\.drupalcode\.org$
 
 # -----------------------------------------------------------------------------
 #  ANTHROPIC DOCUMENTATION
