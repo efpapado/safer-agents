@@ -52,14 +52,17 @@ Read a few after a week of normal work. Frequency and recency do the arguing:
     api.drupal.org              23 attempts   -> probably needed
     raw.githubusercontent.com    1 attempt    -> look into it before allowing
 
-To allow a host permanently, add an anchored pattern to one of two files:
+To allow a host permanently, add an anchored pattern to one of three files:
 
     ../proxy/allowlist-common.txt     all four commands
     ../proxy/allowlist-<tool>.txt     just that one
+    ../proxy/allowlist-custom.txt     all four commands, private to this machine
 
 Put general-purpose sites in the common file. Keep a tool's own file for its own
 service — its model API and its login host — so that, for example, claude cannot
-reach OpenAI's servers.
+reach OpenAI's servers. Put client hosts and internal servers in the custom
+file. It is optional and listed in `.gitignore`, so a pull never overwrites it.
+Create it if it does not exist; the same format applies.
 
 To try a host for a single run:
 

@@ -17,7 +17,12 @@
 #  means claude cannot reach OpenAI's servers and codex cannot reach
 #  Anthropic's, and an unexpected entry in a connection log is easier to notice.
 #
-#  Anything not matched in either file is REFUSED and written to
+#  A third file, allowlist-custom.txt, is read if it exists. It applies to
+#  every command, uses the same format, and is listed in .gitignore. Put
+#  client hosts and internal servers there: they stay on this machine, and a
+#  pull never overwrites them.
+#
+#  Anything not matched in any of these files is REFUSED and written to
 #  connection_logs/. Edit and re-run; no rebuild is needed.
 #
 #  ---------------------------------------------------------------------------

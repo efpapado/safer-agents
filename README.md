@@ -568,6 +568,8 @@ proxy/allowlist-claude.txt    that tool's own service only
 proxy/allowlist-codex.txt
 proxy/allowlist-opencode.txt
 proxy/allowlist-copilot.txt
+proxy/allowlist-custom.txt    your private additions, all four. Optional,
+                              not committed.
 proxy/tinyproxy.conf          gatekeeper configuration
 proxy/ollama.conf             the forwarder's default-deny rules
 

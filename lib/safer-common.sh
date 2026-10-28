@@ -101,6 +101,7 @@
 #      proxy/allowlist-codex.txt
 #      proxy/allowlist-opencode.txt
 #      proxy/allowlist-copilot.txt
+#      proxy/allowlist-custom.txt   your private additions (optional, not committed)
 #
 #      connection_logs/             one file per run, named claude-<time>.log
 #      sessions/                    one record per RUNNING run; a leftover one
@@ -192,12 +193,16 @@ HISTORY_DIR="$SAFER_ROOT/history"
 PROXY_CONF="$PROXY_DIR/tinyproxy.conf"
 
 # ---------------------------------------------------------------------------
-#  The allowlists. Two files are read and joined:
+#  The allowlists. Two files are read and joined, and a third if it exists:
 #
 #    allowlist-common.txt   destinations you want from every tool — the PHP
 #                           manual, drupal.org, and so on
 #    allowlist-<tool>.txt   destinations only this tool needs, which is mostly
 #                           its own model API and its own login service
+#    allowlist-custom.txt   your own private additions, for every tool.
+#                           Optional. Listed in .gitignore, so it is never
+#                           committed: client hosts and internal servers stay
+#                           on this machine, and a pull never overwrites them.
 #
 #  Splitting them this way means claude cannot reach OpenAI's servers, codex
 #  cannot reach Anthropic's, and only copilot can reach GitHub's. Nothing
@@ -206,6 +211,7 @@ PROXY_CONF="$PROXY_DIR/tinyproxy.conf"
 # ---------------------------------------------------------------------------
 ALLOWLIST_COMMON="$PROXY_DIR/allowlist-common.txt"
 ALLOWLIST_TOOL="$PROXY_DIR/allowlist-$TOOL.txt"
+ALLOWLIST_CUSTOM="$PROXY_DIR/allowlist-custom.txt"
 
 # ---------------------------------------------------------------------------
 #  The list of paths inside a code tree that must not be writable — git hook
@@ -3087,8 +3093,8 @@ rw_store() {
 # ---------------------------------------------------------------------------
 #  Build the list of permitted destinations for this run.
 #
-#  Joins allowlist-common.txt and allowlist-<tool>.txt, then appends anything
-#  given with --allow. The result is written next to the allowlists and mounted
+#  Joins allowlist-common.txt and allowlist-<tool>.txt, then allowlist-custom.txt
+#  if it exists, then appends anything given with --allow. The result is written next to the allowlists and mounted
 #  into the gatekeeper.
 #
 #  Why write a combined file instead of mounting the originals: tinyproxy reads
@@ -3120,6 +3126,12 @@ build_effective_allowlist() {
     EFFECTIVE_ALLOWLIST="$PROXY_DIR/.allowlist.effective.$TOOL.$$"
 
     cat "$ALLOWLIST_COMMON" "$ALLOWLIST_TOOL" > "$EFFECTIVE_ALLOWLIST"
+
+    # The custom file is optional. A missing file is the normal case on a
+    # fresh checkout, so it is not an error. An empty file is fine too.
+    if [[ -f "$ALLOWLIST_CUSTOM" ]]; then
+        cat "$ALLOWLIST_CUSTOM" >> "$EFFECTIVE_ALLOWLIST"
+    fi
 
     for host in ${EXTRA_ALLOW+"${EXTRA_ALLOW[@]}"}; do
         # Turn a plain hostname into a safe anchored pattern:
@@ -3420,6 +3432,9 @@ save_connection_log() {
         fi
         echo "# allowlists: $ALLOWLIST_COMMON"
         echo "#             $ALLOWLIST_TOOL"
+        if [[ -f "$ALLOWLIST_CUSTOM" ]]; then
+            echo "#             $ALLOWLIST_CUSTOM"
+        fi
         if [[ ${#EXTRA_ALLOW[@]} -gt 0 ]]; then
             echo "# --allow:    ${EXTRA_ALLOW[*]}"
         fi

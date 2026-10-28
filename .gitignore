@@ -4,3 +4,4 @@ history/*
 sessions/*
 !sessions/README.md
 proxy/.allowlist.effective*
+proxy/allowlist-custom.txt
